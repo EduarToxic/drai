@@ -1,0 +1,210 @@
+{
+  "name": "KB Pruebas RAG 2.0",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "d52b9ab7-99dc-45eb-8877-25a3810e01e3",
+      "name": "Manual Trigger"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f75f90b7-2f8e-4898-8b07-f3790ba8910d",
+              "name": "query",
+              "value": "Dolor abdominal 2 horas en F epigastrio, náuseas",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "id": "123d5137-cf97-43dc-9645-3093d423ea38",
+      "name": "Set — Test Query"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"{{$json.query}}\"\n}\n",
+        "options": {
+          "ignoreResponseCode": true,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        0
+      ],
+      "id": "e198a09d-e1b2-41f2-b54e-9e802671ff37",
+      "name": "HTTP Request (Embeddings)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH params AS (\n  SELECT\n    {{ (() => {\n      const data = $node[\"HTTP Request (Embeddings)\"].json?.data?.[0]?.embedding;\n      return Array.isArray(data) && data.length > 0 ? 'true' : 'false';\n    })() }}::boolean AS has_embedding,\n    CASE\n      WHEN {{ (() => {\n        const data = $node[\"HTTP Request (Embeddings)\"].json?.data?.[0]?.embedding;\n        return Array.isArray(data) && data.length > 0 ? 'true' : 'false';\n      })() }}::boolean\n        THEN ARRAY{{ (() => {\n          const data = $node[\"HTTP Request (Embeddings)\"].json?.data?.[0]?.embedding;\n          return JSON.stringify(Array.isArray(data) ? data : []);\n        })() }}::vector\n      ELSE NULL::vector\n    END AS emb\n),\npref AS (\n  SELECT\n    k.source_id,\n    s.source_name,\n    s.source_path,\n    k.chunk_index,\n    k.page_number,\n    k.content,\n    (k.embedding <=> p.emb) AS dist,\n    1 - (k.embedding <=> p.emb) AS similarity,\n    CASE WHEN k.content ~* '[ÁÉÍÓÚÑáéíóúñ]' THEN 0 ELSE 1 END AS looks_english,\n    ( {{ $node[\"Build KW SQL\"]?.json?.kw_sum_sql ?? '0' }} )      AS kw_pos,\n    ( {{ $node[\"Build KW SQL\"]?.json?.kw_sum_neg_sql ?? '0' }} )  AS kw_neg\n  FROM kb_chunks k\n  JOIN kb_sources s USING (source_id)\n  JOIN params p ON p.has_embedding\n  ORDER BY dist ASC\n  LIMIT 400\n)\nSELECT\n  source_id,\n  source_name,\n  source_path,\n  chunk_index,\n  page_number,\n  LEFT(content, 700) AS chunk,\n  similarity,\n  looks_english\nFROM pref\nWHERE\n  char_length(content) >= 200\n  AND (char_length(content) - char_length(replace(content, '.', ''))) >= 2\n  AND (char_length(content) - char_length(replace(content, ';', ''))) <= 2\n\n  AND content NOT ILIKE '%Abreviaturas%'\n  AND content NOT ILIKE '%Acrónim%'\n  AND content NOT ILIKE '%Glosario%'\n  AND content NOT ILIKE '%Índice%'\n  AND content NOT ILIKE '%Agradecim%'\n  AND content NOT ILIKE '%Bibliograf%'\n  AND content NOT ILIKE '%Referenc%'\n  AND content NOT ILIKE '%Lecturas adicionales%'\n  AND content NOT ILIKE 'tabla %'      AND content NOT ILIKE '% tabla %'\n  AND content NOT ILIKE 'cuadro %'     AND content NOT ILIKE '% cuadro %'\n  AND content NOT ILIKE 'figura %'     AND content NOT ILIKE '% figura %'\n  AND content NOT ILIKE '%RESULTADOS DE MRI%'\n  AND content NOT ILIKE '%DOSIS%'\n  AND content NOT ILIKE '%IM cada semana%'\n  AND content NOT ILIKE '%VO por día%'\n  AND content NOT ILIKE '%actividades de la vida diaria%'\n  AND content NOT ILIKE '%consentimiento informado%'\n  AND content NOT ILIKE '%POLST%'\n  AND content NOT ILIKE '%MOLST%'\n  AND content NOT ILIKE '%All Rights Reserved%'\n  AND content NOT ILIKE '%Privacy Policy%'\n  AND content NOT ILIKE '%Terms of Use%'\n  AND content NOT ILIKE '%Accessibility%'\n  AND content NOT ILIKE '%Access Provided by%'\n\n  AND kw_neg = 0\n\n  AND similarity >= (\n    SELECT COALESCE(MAX(similarity), 0) FROM pref\n  ) - 0.20\n\nORDER BY\n  looks_english ASC,\n  kw_pos DESC,\n  (\n    (content ILIKE '%síntom%')::int +\n    (content ILIKE '%diagn%')::int +\n    (content ILIKE '%tratam%')::int +\n    (content ILIKE '%manejo%')::int +\n    (content ILIKE '%evaluac%')::int +\n    (content ILIKE '%examen%')::int +\n    (content ILIKE '%complic%')::int +\n    (content ILIKE '%agud%')::int +\n    (content ILIKE '%crónic%')::int +\n    (content ILIKE '%riesgo%')::int\n  ) DESC,\n  dist ASC\nLIMIT 12;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        700,
+        0
+      ],
+      "id": "fee3f42d-e6ea-4508-9033-204cbc508bb9",
+      "name": "DB ▸ RAG: Buscar pasajes",
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const sourceItems = Array.isArray(items) ? items : [];\nconst rows = sourceItems.map((item) => item?.json ?? item ?? {});\nconst embedding = $node[\"HTTP Request (Embeddings)\"]?.json?.data?.[0]?.embedding;\nconst hasEmbedding = Array.isArray(embedding) && embedding.length > 0;\n\nif (!hasEmbedding) {\n  return [{ json: { error: \"no_embedding\" } }];\n}\n\nconst ensureString = (value) => {\n  if (value === undefined || value === null) return \"\";\n  if (typeof value === \"string\") return value;\n  if (typeof value === \"number\" || typeof value === \"boolean\") return String(value);\n  try { return JSON.stringify(value) ?? \"\"; } catch { return String(value); }\n};\n\nconst stripDiacritics = (text) => ensureString(text).normalize(\"NFD\").replace(/[̀-ͯ]/g, \"\");\nconst toWords = (text) => stripDiacritics(text)\n  .toLowerCase()\n  .replace(/[^a-z0-9\\s]/gi, \" \")\n  .split(/\\s+/)\n  .filter((token) => token.length >= 3);\n\nconst clean = (text) => {\n  let value = ensureString(text);\n  value = value.replace(/-\\s+\n?/g, \"\");\n  value = value.replace(/\\s+/g, \" \");\n  value = value.replace(/\\s*©\\s?20\\d{2}.*$/i, \"\");\n  return value.trim();\n};\n\nconst prettySource = (text) => {\n  let value = ensureString(text);\n  value = value.replace(/\\.pdf$/i, \"\");\n  value = value.replace(/_/g, \" \");\n  value = value.replace(/\\s*[_\\s]\\d{8}[_\\s]\\d{6}\\s*$/, \"\");\n  return value.trim();\n};\n\nconst pageDisplay = (row) => {\n  const candidates = [row.page_number, row.page, row.pageIndex, row.page_idx]\n    .map((n) => Number(n))\n    .filter((n) => Number.isFinite(n));\n  const page = candidates.length ? candidates[0] : null;\n  if (!Number.isFinite(page) || page < 1) return null;\n  return Math.trunc(page);\n};\n\nconst ADMIN_RE = /(actividades de la vida diaria|polst|molst|consentimiento informado|privacy policy|terms of use|all rights reserved|accessibility)/i;\nconst REF_RE = /(N\\s*Engl\\s*J\\s*Med|JAMA|Lancet|Ann\\s+Neurol|Hepatology|MMWR|PubMed|doi:|Referenc|Lecturas\\s+adicionales)/i;\nconst isAbbrevHeavy = (text) => {\n  const punct = (text.match(/[;,:()/%]/g) || []).length;\n  const uppers = (text.match(/\b[A-ZÁÉÍÓÚÑ]{2,}\b/g) || []).length;\n  return punct >= 18 || uppers >= 40;\n};\n\nconst queryText = ensureString($node[\"Set — Test Query\"]?.json?.query ?? \"\");\nconst userWords = new Set(toWords(queryText));\nconst keywordScore = (text) => {\n  const words = toWords(text);\n  let score = 0;\n  for (const word of words) if (userWords.has(word)) score += 1;\n  return score;\n};\n\nlet bestSim = 0;\nfor (const row of rows) {\n  const sim = Number(row?.similarity ?? row?.score ?? 0);\n  if (Number.isFinite(sim)) bestSim = Math.max(bestSim, sim);\n}\n\nconst MIN_SIM = 0.12;\nconst RELAX = 0.12;\nconst pool = [];\n\nfor (const row of rows) {\n  const text = clean(row?.chunk ?? row?.chunk_text ?? row?.content ?? \"\");\n  if (!text) continue;\n  const sim = Number(row?.similarity ?? row?.score ?? 0);\n  const longOK = text.length >= 160;\n  const notAdmin = !ADMIN_RE.test(text);\n  const notRef = !REF_RE.test(text);\n  const notAbbr = !isAbbrevHeavy(text);\n  const simOK = sim >= Math.max(MIN_SIM, bestSim - RELAX);\n  const kscore = keywordScore(text);\n  const hasSignal = kscore >= 1 || sim >= 0.22;\n\n  if (longOK && notAdmin && notRef && notAbbr && simOK && hasSignal) {\n    const combined = 0.7 * sim + 0.3 * (Math.min(kscore, 30) / 30);\n    pool.push({ ...row, cleaned: text, sim, kscore, combined, reason: \"main\" });\n  }\n}\n\nif (pool.length === 0) {\n  for (const row of rows) {\n    const text = clean(row?.chunk ?? row?.chunk_text ?? row?.content ?? \"\");\n    if (!text) continue;\n    const sim = Number(row?.similarity ?? row?.score ?? 0);\n    const longOK = text.length >= 140;\n    const notAdmin = !ADMIN_RE.test(text);\n    const notRef = !REF_RE.test(text);\n    const simOK = sim >= Math.max(0.10, bestSim - 0.18);\n    const kscore = keywordScore(text);\n    const hasSignal = kscore >= 1 || sim >= 0.24;\n\n    if (longOK && notAdmin && notRef && simOK && hasSignal) {\n      const combined = 0.65 * sim + 0.35 * (Math.min(kscore, 30) / 30);\n      pool.push({ ...row, cleaned: text, sim, kscore, combined, reason: \"fallback1\" });\n    }\n  }\n}\n\nif (pool.length === 0 && rows.length > 0) {\n  const bestRow = [...rows].sort((a, b) => (Number(b?.similarity ?? b?.score ?? 0) - Number(a?.similarity ?? a?.score ?? 0)))[0];\n  const text = clean(bestRow?.chunk ?? bestRow?.chunk_text ?? bestRow?.content ?? \"\");\n  const sim = Number(bestRow?.similarity ?? bestRow?.score ?? 0);\n  pool.push({ ...bestRow, cleaned: text, sim, kscore: keywordScore(text), combined: sim, reason: \"fallback_force_best\" });\n}\n\npool.sort((a, b) => (b.combined - a.combined) || (b.sim - a.sim));\n\nconst MAX_TOTAL = 1550;\nconst MAX_PER = 700;\nconst parts = [];\nconst picked = [];\nlet total = 0;\n\nfor (const candidate of pool) {\n  if (!candidate.cleaned) continue;\n  let snippet = candidate.cleaned;\n  if (snippet.length > MAX_PER) {\n    const cut = snippet.lastIndexOf('. ', MAX_PER);\n    const slicePoint = cut > 420 ? cut : MAX_PER;\n    snippet = snippet.slice(0, slicePoint).trim();\n    if (!snippet.endsWith('.')) snippet += '…';\n  }\n\n  parts.push(snippet);\n  picked.push(candidate);\n  total += snippet.length;\n  if (parts.length >= 3 || total >= MAX_TOTAL) break;\n}\n\nconst context_text = parts.join(\"\n\n---\n\n\");\n\nconst citationsMap = new Map();\nfor (const candidate of picked) {\n  const source = prettySource(candidate?.source_name ?? candidate?.source ?? candidate?.source_id ?? \"\");\n  if (!source) continue;\n  const pageNum = pageDisplay(candidate);\n  const pageLabel = pageNum ? `p. ${pageNum}` : null;\n  const key = `${source}||${pageLabel ?? ''}`;\n  if (citationsMap.has(key)) continue;\n  citationsMap.set(key, {\n    source,\n    page: pageLabel,\n    chunk_index: Number.isFinite(Number(candidate?.chunk_index)) ? Number(candidate.chunk_index) : null,\n    similarity: Math.round((Number(candidate?.sim ?? 0)) * 100) / 100,\n    picked_by: candidate.reason ?? null\n  });\n}\n\nconst citations = Array.from(citationsMap.values());\n\nconst rag_test = {\n  query: queryText,\n  context_text,\n  citations,\n  used: parts.length,\n  top_k: rows.length,\n  has_results: parts.length > 0\n};\n\nreturn [{ json: { query: queryText, rag_test } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2.1,
+      "position": [
+        940,
+        0
+      ],
+      "id": "0022626c-1927-420e-9c1d-c8043a5b3e46",
+      "name": "Assemble RAG Context (pruebas)"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ddbf69a4-8474-4a51-b3a1-3d2226d10c4f",
+              "name": "context_text",
+              "value": "={{ $json.rag_test?.context_text ?? '' }}\n",
+              "type": "string"
+            },
+            {
+              "id": "49dc0e5a-9f8b-4fc5-a423-654b0f1f8ac7",
+              "name": "citations",
+              "value": "={{ $json.rag_test?.citations ?? [] }}\n",
+              "type": "json"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1180,
+        0
+      ],
+      "id": "56c7d6f6-bed4-4efe-8747-b0f31436b980",
+      "name": "Return Data"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set — Test Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set — Test Query": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request (Embeddings)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request (Embeddings)": {
+      "main": [
+        [
+          {
+            "node": "DB ▸ RAG: Buscar pasajes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB ▸ RAG: Buscar pasajes": {
+      "main": [
+        [
+          {
+            "node": "Assemble RAG Context (pruebas)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble RAG Context (pruebas)": {
+      "main": [
+        [
+          {
+            "node": "Return Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "6d48b38d-eed9-4c44-a76a-afc5d4ee5e0e",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "id": "OF93v01NlgfJGbmH",
+  "tags": []
+}
