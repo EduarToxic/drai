@@ -1,0 +1,12 @@
+# n8n / credenciales / env
+.env
+*.env
+**/credentials*.json
+**/secrets*
+**/config*
+
+# node
+node_modules/
+
+# artefactos locales
+*.log

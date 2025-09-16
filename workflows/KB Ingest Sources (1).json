@@ -1,0 +1,491 @@
+{
+  "name": "KB Ingest Sources",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -464,
+        -464
+      ],
+      "id": "144c776c-3f3c-42c8-89da-01c63b37698c",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/data/kb/inbox/*.pdf",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        -464
+      ],
+      "id": "cbadfe71-01c5-4d1f-ba98-2c9393602a81",
+      "name": "Read KB Inbox PDF"
+    },
+    {
+      "parameters": {
+        "command": "=sha256sum \"/data/kb/inbox/{{$json[\"fileName\"]}}\"\n"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -464
+      ],
+      "id": "7bb75386-520a-4921-b3c9-faf9adcdd3f1",
+      "name": "Hash File (sha256sum)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO kb_sources (source_name, source_type, source_path, hash)\n  VALUES (\n    '{{$json.filename}}',\n    'pdf',\n    '{{$json.src_path}}',\n    '{{ ($node[\"Hash File (sha256sum)\"]?.json?.stdout || \"\").split(/\\s+/)[0] || \"\" }}'\n  )\n  ON CONFLICT (hash) DO NOTHING\n  RETURNING source_id\n)\nSELECT \n  COALESCE(\n    (SELECT source_id FROM ins),\n    (SELECT source_id FROM kb_sources WHERE hash = '{{ ($node[\"Hash File (sha256sum)\"]?.json?.stdout || \"\").split(/\\s+/)[0] || \"\" }}')\n  ) AS source_id,\n  (SELECT COUNT(*) > 0 FROM ins) AS inserted,\n  '{{$json.filename}}'::text AS filename,\n  '{{$json.src_path}}'::text AS src_path;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        256,
+        -256
+      ],
+      "id": "1e608a31-d2a3-4ab8-8fdc-f14ef0250882",
+      "name": "Insert KB Source",
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ee10d623-1d88-459d-b1b4-452f670f46da",
+              "leftValue": "={{$json.inserted}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        272,
+        0
+      ],
+      "id": "0754ee29-729a-457a-b5fb-90e7da9c16d5",
+      "name": "Check Insert"
+    },
+    {
+      "parameters": {
+        "command": "=mv \"{{$json.src_path.trim()}}\" \"{{$json.dest_path.trim()}}\"\n"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1072,
+        192
+      ],
+      "id": "1bfa2d87-418e-4562-b4ee-e52b4ab212c2",
+      "name": "Move to Processed"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "072847c7-561d-4b59-9b29-71e74c630dab",
+              "name": "filename",
+              "value": "={{ String($json.fileName || $json.filename || (($node[\"Hash File (sha256sum)\"].json.stdout || '').split(/\\s+/).pop().split('/').pop())).trim() }}\n",
+              "type": "string"
+            },
+            {
+              "id": "d188cb3c-35f2-4ed1-9d54-84ba63af468c",
+              "name": "hash",
+              "value": "={{ String(((( $node[\"Hash File (sha256sum)\"].json.stdout || '' ).split(/\\s+/)[0]) || '')).trim() }}\n",
+              "type": "string"
+            },
+            {
+              "id": "e70351ed-c745-499a-a0d5-997efbed6749",
+              "name": "src_path",
+              "value": "={{ String($json.path || $json.filePath || $json.file || (($node[\"Hash File (sha256sum)\"].json.stdout || '').split(/\\s+/).pop())).trim() }}\n",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        32,
+        -272
+      ],
+      "id": "dac4815a-b676-46d3-b87c-bdbdf5185067",
+      "name": "Assemble Meta"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0dfe3c00-84ab-4396-9d04-76af1ce54b58",
+              "name": "dest_name",
+              "value": "={{\n  (\n    String($json.filename || $json.fileName || 'file.pdf').trim()\n      .normalize('NFD').replace(/[\\u0300-\\u036f]/g,'') // sin tildes\n      .replace(/\\.pdf$/i,'')                           // quita .pdf\n      .replace(/\\s+/g,'_')                             // espacios -> _\n      .replace(/[^A-Za-z0-9_.-]/g,'')                  // limpia raros\n  ) + '_' + $now.toFormat('yyyyLLdd_HHmmss') + '.pdf'\n}}\n",
+              "type": "string"
+            },
+            {
+              "id": "eeee301b-551a-4c10-8962-bff072850d7f",
+              "name": "",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        512,
+        0
+      ],
+      "id": "365fe974-e8e0-480b-94cd-4ca7c20a688d",
+      "name": "Plan Move Name"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE kb_sources\n   SET source_path = '{{$json.clean_dest_path}}'\n WHERE source_id = {{$json.clean_source_id}};\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1648,
+        192
+      ],
+      "id": "9f19d4fe-0fd8-40cb-8749-67fcbb646a62",
+      "name": "Update Source Path",
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c0d9bbd3-2c22-46d7-b4f5-dd784397b3af",
+              "name": "dest_path",
+              "value": "={{ '/data/kb/processed/' + String($json.dest_name || '').trim() }}\n",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        704,
+        0
+      ],
+      "id": "3cb47945-9615-4247-83eb-9944612da506",
+      "name": "Build Dest Path"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "82f13283-c4c6-4481-81b5-6b2d03356f04",
+              "leftValue": "={{$json.inserted}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        864,
+        176
+      ],
+      "id": "b8c0e097-f841-4c05-803b-1a0a5692545f",
+      "name": "Guardarraíl antes de mover"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6ea377cd-2a44-4d83-b516-59ad50ac69ef",
+              "name": "clean_source_id",
+              "value": "={{ Number($json.source_id ?? $json.rows?.[0]?.source_id ?? -1) }}\n",
+              "type": "number"
+            },
+            {
+              "id": "5d71566e-ef5c-4da5-96b8-8a4ea92a867e",
+              "name": "clean_dest_path",
+              "value": "={{\n  (() => {\n    const dp = String($json.dest_path || '').trim();\n    if (dp && !dp.endsWith('/')) return dp; // ya viene bien\n    const base =\n      String(($json.dest_name || '').trim()) ||\n      (\n        String(($json.filename || $json.fileName || 'file').trim())\n          .normalize('NFD').replace(/[\\u0300-\\u036f]/g,'')\n          .replace(/\\.pdf$/i,'').replace(/\\s+/g,'_').replace(/[^A-Za-z0-9_.-]/g,'')\n        + '_' + $now.toFormat('yyyyLLdd_HHmmss') + '.pdf'\n      );\n    return '/data/kb/processed/' + base;\n  })()\n}}\n",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1264,
+        192
+      ],
+      "id": "f21c39d3-b25a-47fe-aa9c-8347bb2cd086",
+      "name": "Coerce For Update"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "57c08b34-a357-4f92-ad20-fd247e126a8a",
+              "leftValue": "={{$json.clean_dest_path}}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "6df4a3c6-90de-4248-9959-7cc178abecdd",
+              "leftValue": "={{ Number(String($json.clean_source_id).trim()) }}\n",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        192
+      ],
+      "id": "efe0b563-f1b8-4be5-a6fa-846d136985d0",
+      "name": "IF guardarraíl (antes del Update)"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Read KB Inbox PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read KB Inbox PDF": {
+      "main": [
+        [
+          {
+            "node": "Hash File (sha256sum)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash File (sha256sum)": {
+      "main": [
+        [
+          {
+            "node": "Assemble Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert KB Source": {
+      "main": [
+        [
+          {
+            "node": "Check Insert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Insert": {
+      "main": [
+        [
+          {
+            "node": "Plan Move Name",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Plan Move Name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Meta": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Move Name": {
+      "main": [
+        [
+          {
+            "node": "Build Dest Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Processed": {
+      "main": [
+        [
+          {
+            "node": "Coerce For Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dest Path": {
+      "main": [
+        [
+          {
+            "node": "Guardarraíl antes de mover",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardarraíl antes de mover": {
+      "main": [
+        [
+          {
+            "node": "Move to Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coerce For Update": {
+      "main": [
+        [
+          {
+            "node": "IF guardarraíl (antes del Update)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF guardarraíl (antes del Update)": {
+      "main": [
+        [
+          {
+            "node": "Update Source Path",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Source Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "2e24ab8b-8267-4dbf-9d00-79801360d579",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "26c5b7ffa6d42a43f69cb24f731969e90a1796cf64d2684e80f4305e5149b46e"
+  },
+  "id": "9O4yURBD1NH1LtP9",
+  "tags": []
+}

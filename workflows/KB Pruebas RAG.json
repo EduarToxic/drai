@@ -1,0 +1,62 @@
+{
+  "name": "KB Pruebas RAG",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "76dd5c12-5997-473e-943b-2dc9eb032b61",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- ✅ Chequeos y mantenimiento ligeros (SEGUROS en n8n)\n\n-- Asegura la extensión vector (no rompe si ya existe)\nCREATE EXTENSION IF NOT EXISTS vector;\n\n-- Refresca estadísticas para el planner\nANALYZE kb_chunks;\n\n-- 📋 Reporte unificado: índices + tamaño + confirmación de ANALYZE\nWITH idx AS (\n  SELECT\n    'indexes'::text AS section,\n    indexname,\n    indexdef\n  FROM pg_indexes\n  WHERE tablename = 'kb_chunks'\n    AND indexname IN ('kb_chunks_embedding_ivfflat','kb_chunks_sourceid_idx')\n),\nsz AS (\n  SELECT\n    'index_size'::text AS section,\n    'kb_chunks_embedding_ivfflat'::text AS indexname,\n    COALESCE(\n      pg_size_pretty(pg_relation_size(to_regclass('kb_chunks_embedding_ivfflat'))),\n      'MISSING'\n    ) AS info\n),\nan AS (\n  SELECT\n    'analyze'::text AS section,\n    'kb_chunks'::text AS indexname,\n    ('done at ' || to_char(now(), 'YYYY-MM-DD HH24:MI:SS')) AS info\n)\nSELECT * FROM idx\nUNION ALL\nSELECT section, indexname, info FROM sz\nUNION ALL\nSELECT section, indexname, info FROM an;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        208,
+        0
+      ],
+      "id": "2bf9f2cd-25da-493c-9489-4dfdfad79911",
+      "name": "DB ▸ RAG: Índices & ANALYZE (healthcheck)",
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "DB ▸ RAG: Índices & ANALYZE (healthcheck)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c9c81ba7-1b7d-47b6-b6f0-bb54662fab25",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "26c5b7ffa6d42a43f69cb24f731969e90a1796cf64d2684e80f4305e5149b46e"
+  },
+  "id": "yEkskOUsTOW97VPJ",
+  "tags": []
+}

@@ -1,0 +1,649 @@
+{
+  "name": "DrAI",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Telegram Trigger → items[0].json\nconst t = items[0].json;\nconst msg = t?.message || {};\nconst chatId = msg.chat?.id || t.chatId || t.chat_id;\n\n// Utilidades\nconst toNum = v => (v === null || v === undefined || v === '' ? undefined : Number(v));\nconst sexMap = s => {\n  const x = String(s || '').trim().toLowerCase();\n  if (['female','male','other','unknown'].includes(x)) return x;\n  if (x === 'f' || x === 'mujer') return 'female';\n  if (x === 'm' || x === 'hombre') return 'male';\n  return 'unknown';\n};\nconst now = new Date().toISOString();\n\n// Intento de inferencia rápida desde texto libre\nconst text = (msg.text || '').trim();\nconst ageMatch = text.match(/\\b(\\d{1,3})\\s*(años|a|yo)\\b/i);\nconst sexMatch = text.match(/\\b([mf]|male|female|hombre|mujer)\\b/i);\nconst inferredAge = ageMatch ? Number(ageMatch[1]) : undefined;\nconst inferredSex = sexMatch\n  ? sexMap(sexMatch[1] === 'm' || /hombre|male/i.test(sexMatch[1]) ? 'male'\n          : sexMatch[1] === 'f' || /mujer|female/i.test(sexMatch[1]) ? 'female'\n          : sexMatch[1])\n  : 'unknown';\n\n// Payload estándar DrAI v1.0\nconst normalized = {\n  chatId,\n  // Lo que tu API actual consume como \"question\":\n  question: text,\n\n  // Estructura común lista para FASE 3+\n  patient: {\n    id: \"\",\n    full_name: msg.from?.first_name || \"Paciente\",\n    document_id: \"\",\n    age: toNum(inferredAge) ?? null,     // 0 si desconocida\n    sex: inferredSex,                 // 'female'|'male'|'other'|'unknown'\n    phone: \"\",\n    email: \"\",\n    consent: true\n  },\n  context: {\n    channel: \"telegram\",\n    timestamp: now,\n    locale: \"es-CO\",\n    location: \"\"\n  },\n  symptoms: text ? [{ name: text, onset_days: undefined, severity: \"unknown\", notes: \"\" }] : [],\n  red_flags_reported: [],\n  past_history: [],\n  meds_current: [],\n  allergies: [],\n  vitals: {},\n\n  // Compatibilidad con tu API /ask\n  history: \"\",\n  vitals_compact: {}\n};\n\nreturn [{ json: normalized }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        0
+      ],
+      "id": "6a03bbbd-55ed-44e3-9b73-373dee6216ac",
+      "name": "Normalize Input"
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {
+          "chatIds": ""
+        }
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -256,
+        0
+      ],
+      "id": "8bb25acf-d341-41f1-b165-85d4e95c05da",
+      "name": "Telegram Trigger",
+      "webhookId": "16f748f7-5e4c-42e6-9163-95cad5c89238",
+      "credentials": {
+        "telegramApi": {
+          "id": "sNeZEtMSFGvnI143",
+          "name": "Telegram DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "68a7e917-b694-4649-a34d-5a7e4d924c46",
+              "name": "user_payload",
+              "value": "={{ ({\n  question: $node[\"Normalize Input\"].json.query_text \n         || $node[\"Normalize Input\"].json.message_clean \n         || $node[\"Telegram Trigger\"].json.message?.text \n         || '',\n  channel: 'telegram',\n  vitals: $node[\"Normalize Input\"].json.vitals || {},\n  rag_context: $node[\"Assemble RAG Context\"].json.rag?.context_text || '',\n  rag_citations: Array.isArray($node[\"Assemble RAG Context\"].json.rag?.citations)\n    ? $node[\"Assemble RAG Context\"].json.rag.citations : []\n}) }}\n",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1216,
+        16
+      ],
+      "id": "d26b94c5-6c61-4df6-9f0b-3b33628acd78",
+      "name": "Build Prompt"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse JSON robusto: acepta data, raw o body, y adjunta depuración en __debug\nconst input = items[0]?.json ?? {};\nlet payload = input.data ?? input.raw ?? input.body ?? input;\n\n// 👀 bundle de depuración (no rompe el resto del flujo)\nconst dbg = { received: {} };\ntry { dbg.received = JSON.parse(JSON.stringify(input || {})); } catch { dbg.received = { note: 'no-clonable' }; }\n\n// 1) Si ya viene como objeto con las claves esperadas, pasa tal cual + debug\nif (\n  payload && typeof payload === 'object' &&\n  ('risk_level' in payload || 'probable_conditions' in payload || 'codes' in payload)\n) {\n  return [{ json: { ...payload, __debug: dbg } }];\n}\n\n// 2) Convertimos a string\nlet text;\ntry { text = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {}); }\ncatch { text = String(payload ?? ''); }\ntext = text.trim();\ndbg.ai_text = text;\n\n// 3) Quitamos fences de Markdown si vienen\nif (text.startsWith('```')) {\n  text = text.replace(/^```(?:json)?/i, '').replace(/```$/,'').trim();\n}\ndbg.ai_text_stripped = text;\n\n// 4) Intento directo de parseo\ntry {\n  const parsed = JSON.parse(text);\n  return [{ json: { ...parsed, __debug: dbg } }];\n} catch { /* seguimos */ }\n\n// 5) Fallback: recortar desde la primera \"{\" hasta la última \"}\"\nconst s = text.indexOf('{'), e = text.lastIndexOf('}');\nif (s !== -1 && e !== -1 && e > s) {\n  const slice = text.slice(s, e + 1);\n  dbg.slice = slice;\n  const parsed = JSON.parse(slice); // si falla, lanza excepción\n  return [{ json: { ...parsed, __debug: dbg } }];\n}\n\n// 6) Último recurso: devolvemos un shape vacío que hará fallar el IF de salida (ok=false)\nreturn [{\n  json: {\n    risk_level: \"\",\n    probable_conditions: [],\n    recommendations: [],\n    red_flags: [],\n    needs_doctor: false,\n    citations: [],\n    codes: { cie10: [], cups: [], meds: [] },\n    ok: false,\n    __debug: { ...dbg, error: \"No pude parsear JSON devuelto por la IA.\" }\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1712,
+        0
+      ],
+      "id": "5dcceb10-905b-4511-a747-49c3dd17c23c",
+      "name": "Parse JSON",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "={{$node[\"Normalize Input\"].json[\"chatId\"]}}",
+        "text": "Estoy teniendo un problema procesando tu caso en este momento. Por favor indícame en un solo mensaje: • Edad • Sexo (M/F) • Días de evolución • Indícame tus síntomas Opcional: temperatura y saturación de O₂.  Ejemplo: “M, 28 años, 3 días: fiebre, tos, dolor de garganta”",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2192,
+        240
+      ],
+      "id": "1f148cfc-1517-4e4a-87c7-b635e9dc6e41",
+      "name": "Send (Error amable)",
+      "webhookId": "69891607-ae8c-41d1-bc2c-fa0c401ed99b",
+      "credentials": {
+        "telegramApi": {
+          "id": "sNeZEtMSFGvnI143",
+          "name": "Telegram DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{$node[\"Normalize Input\"].json[\"chatId\"]}}\n",
+        "text": "📝 Para orientarte mejor necesito: • Edad • Sexo (M/F) • Días de evolución • Indícame tus síntomas Opcional: temperatura y saturación de O₂.  Ejemplo: “M, 28 años, 3 días: fiebre, tos, dolor de garganta”",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        -160
+      ],
+      "id": "f6585b34-25da-4b2b-8df9-9bfedba79d58",
+      "name": "TG Send — Pedir datos",
+      "webhookId": "69891607-ae8c-41d1-bc2c-fa0c401ed99b",
+      "credentials": {
+        "telegramApi": {
+          "id": "sNeZEtMSFGvnI143",
+          "name": "Telegram DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{$node[\"Normalize Input\"].json[\"chatId\"]}}",
+        "text": "=={{ (() => {\n  const r = $json || {};\n  const emoji = {red:'🔴',orange:'🟠',yellow:'🟡',green:'🟢',blue:'🔵'};\n  const label = {red:'ROJO',orange:'NARANJA',yellow:'AMARILLO',green:'VERDE',blue:'AZUL'};\n  const visitText = {\n    immediate_ed: 'Sí — PRESENCIAL por URGENCIAS (inmediato)',\n    'urgent_<=30m': 'Sí — PRESENCIAL por URGENCIAS (≤ 30 min)',\n    'urgent_<=6h': 'Sí — PRESENCIAL PRIORITARIA (≤ 6 h)',\n    visit_24_48h: 'Sí — TELECONSULTA o PRESENCIAL PRIORITARIA en 24–48 h',\n    scheduled_or_telemed: 'Sí — TELECONSULTA o PRESENCIAL NO URGENTE (consulta externa)',\n  };\n  const uniq = a => Array.from(new Set((a||[]).map(x=>String(x).trim()))).filter(Boolean);\n  const cap  = s => { const t = String(s||'').trim(); return t? t.charAt(0).toUpperCase()+t.slice(1):t; };\n\n  const lines = [];\n  lines.push(`${emoji[r.risk_level]||'⚪'} TIPO DE TRIAGE: ${r.triage_level??'?'} (${label[r.risk_level]||'—'})`);\n\n  const conds = uniq(r.probable_conditions).slice(0,5).map(cap);\n  const recs  = uniq(r.recommendations).slice(0,6).map(cap);\n  const reds  = uniq(r.red_flags).slice(0,10).map(cap);\n\n  if (conds.length) lines.push('🩺 Posibles condiciones:\\n• ' + conds.join('\\n• '));\n  if (recs.length)  lines.push('✅ Recomendaciones:\\n• ' + recs.join('\\n• '));\n  if (reds.length)  lines.push('⚠️ Signos de alarma:\\n• ' + reds.join('\\n• '));\n\n  lines.push('👩‍⚕️ ¿Necesita médico?: ' + (visitText[String(r.visit_type||'').trim()] || 'Sí — criterio clínico'));\n\n  if (Array.isArray(r.citations) && r.citations.length) {\n    const cites = r.citations.map(c => (typeof c === 'string' ? c : `${c.source||'Fuente'}${c.page?` (p. ${c.page})`:''}`));\n    lines.push('📚 Referencias:\\n• ' + cites.join('\\n• '));\n  }\n\n  lines.push('— Este mensaje es informativo y no reemplaza una evaluación médica presencial.');\n\n  let out = lines.join('\\n\\n');\n  if (out.length > 3800) { const noRefs = lines.filter(l => !l.startsWith('📚')); out = noRefs.join('\\n\\n'); }\n  return out.trim();\n})() }}\n",
+        "additionalFields": {
+          "disable_web_page_preview": true
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2224,
+        -80
+      ],
+      "id": "194cee54-6760-451a-8c12-e35da2159dd8",
+      "name": "TG Send — Respuesta IA",
+      "webhookId": "69891607-ae8c-41d1-bc2c-fa0c401ed99b",
+      "credentials": {
+        "telegramApi": {
+          "id": "sNeZEtMSFGvnI143",
+          "name": "Telegram DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"{{$json.query}}\"\n}\n",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        256
+      ],
+      "id": "6154e201-011c-4a9a-a19b-3286a02ceefd",
+      "name": "HTTP Request (Embeddings)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH q AS (\n  SELECT (ARRAY{{ JSON.stringify($node[\"HTTP Request (Embeddings)\"].json.data[0].embedding) }}::vector) AS emb\n),\n-- Prefiltra por similitud (top-N) para acelerar con muchos libros\npref AS (\n  SELECT\n    k.source_id,\n    s.source_name,\n    s.source_path,\n    k.chunk_index,\n    k.page_number,\n    k.content,\n    -- distancia y similitud (cosine)\n    (k.embedding <=> q.emb) AS dist,\n    1 - (k.embedding <=> q.emb) AS similarity,\n    CASE WHEN k.content ~* '[ÁÉÍÓÚÑáéíóúñ]' THEN 0 ELSE 1 END AS looks_english,\n    -- puntajes de keywords (positivas/negativas) calculados una sola vez\n    ( {{ $node[\"Build KW SQL\"].json.kw_sum_sql || '0' }} )      AS kw_pos,\n    ( {{ $node[\"Build KW SQL\"].json.kw_sum_neg_sql || '0' }} )  AS kw_neg\n  FROM kb_chunks k\n  JOIN kb_sources s USING (source_id)\n  CROSS JOIN q\n  ORDER BY dist ASC\n  LIMIT 400  -- ajusta 200–600 según rendimiento\n)\nSELECT\n  source_id,\n  source_name,\n  source_path,\n  chunk_index,\n  page_number,\n  LEFT(content, 700) AS chunk,\n  similarity,\n  looks_english\nFROM pref\nWHERE\n  -- párrafos (evita leyendas sueltas y listas)\n  char_length(content) >= 200\n  AND (char_length(content) - char_length(replace(content, '.', ''))) >= 2\n  AND (char_length(content) - char_length(replace(content, ';', ''))) <= 2\n\n  -- descarta secciones no clínicas / bibliográficas / tablas-figuras / administrativos / legales\n  AND content NOT ILIKE '%Abreviaturas%'\n  AND content NOT ILIKE '%Acrónim%'\n  AND content NOT ILIKE '%Glosario%'\n  AND content NOT ILIKE '%Índice%'\n  AND content NOT ILIKE '%Agradecim%'\n  AND content NOT ILIKE '%Bibliograf%'\n  AND content NOT ILIKE '%Referenc%'\n  AND content NOT ILIKE '%Lecturas adicionales%'\n  AND content NOT ILIKE 'tabla %'      AND content NOT ILIKE '% tabla %'\n  AND content NOT ILIKE 'cuadro %'     AND content NOT ILIKE '% cuadro %'\n  AND content NOT ILIKE 'figura %'     AND content NOT ILIKE '% figura %'\n  AND content NOT ILIKE '%RESULTADOS DE MRI%'\n  AND content NOT ILIKE '%DOSIS%'\n  AND content NOT ILIKE '%IM cada semana%'\n  AND content NOT ILIKE '%VO por día%'\n  AND content NOT ILIKE '%actividades de la vida diaria%'\n  AND content NOT ILIKE '%consentimiento informado%'\n  AND content NOT ILIKE '%POLST%'\n  AND content NOT ILIKE '%MOLST%'\n  AND content NOT ILIKE '%All Rights Reserved%'\n  AND content NOT ILIKE '%Privacy Policy%'\n  AND content NOT ILIKE '%Terms of Use%'\n  AND content NOT ILIKE '%Accessibility%'\n  AND content NOT ILIKE '%Access Provided by%'\n\n  -- si el paciente NO habló de viajes, excluye secciones de viaje/tropical\n  AND kw_neg = 0\n\n  -- mantén solo candidatos cercanos al mejor (reduce ruido y coste)\n  AND similarity >= (\n    SELECT COALESCE(MAX(similarity), 0) FROM pref\n  ) - 0.20\n\nORDER BY\n  looks_english ASC,\n  kw_pos DESC,\n  (\n    (content ILIKE '%síntom%')::int +\n    (content ILIKE '%diagn%')::int +\n    (content ILIKE '%tratam%')::int +\n    (content ILIKE '%manejo%')::int +\n    (content ILIKE '%evaluac%')::int +\n    (content ILIKE '%examen%')::int +\n    (content ILIKE '%complic%')::int +\n    (content ILIKE '%agud%')::int +\n    (content ILIKE '%crónic%')::int +\n    (content ILIKE '%riesgo%')::int\n  ) DESC,\n  dist ASC\nLIMIT 12;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        624,
+        256
+      ],
+      "id": "f9a98608-2a17-4669-bc49-8567cd3a7534",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assemble RAG Context — versión generalista (con citas usando source_name)\n// === Entrada: rows desde el nodo previo (Execute SQL / tu recolector) ===\nconst rows = (items || []).map(it => it.json || it) || [];\n\n// ---------- texto del usuario ----------\nconst userText =\n  ($node[\"Normalize Input\"]?.json?.message_clean) ??\n  ($node[\"Normalize Input\"]?.json?.text_clean) ??\n  ($node[\"Normalize Input\"]?.json?.query_text) ??\n  ($node[\"Telegram Trigger\"]?.json?.message?.text) ??\n  ($node[\"Telegram Trigger\"]?.json?.text) ??\n  \"\";\n\n// ---------- helpers ----------\nconst ensureString = (v) => {\n  if (v === undefined || v === null) return \"\";\n  if (typeof v === \"string\") return v;\n  try { return JSON.stringify(v) ?? \"\"; } catch { return String(v); }\n};\nconst stripDiacritics = (s) => ensureString(s).normalize(\"NFD\").replace(/[\\u0300-\\u036f]/g, \"\");\nconst toWords = (t) => stripDiacritics(ensureString(t).toLowerCase())\n  .replace(/[^a-z0-9\\s]/gi, \" \")\n  .split(/\\s+/)\n  .filter(w => w.length >= 3);\n\nconst userWords = new Set(toWords(userText));\n\nconst clean = (t) => {\n  t = ensureString(t);\n  t = t.replace(/-\\s+\\n?/g, \"\");\n  t = t.replace(/\\s+/g, \" \");\n  t = t.replace(/\\s*©\\s?20\\d{2}.*$/i, \"\");\n  return t.trim();\n};\n\nconst ADMIN_RE = /(actividades de la vida diaria|polst|molst|post\\b|consentimiento informado|accesibilidad|privacy policy|terms of use|all rights reserved)/i;\nconst REF_RE   = /(N\\s*Engl\\s*J\\s*Med|JAMA|Lancet|Ann\\s+Neurol|Hepatology|MMWR|PubMed|doi:|References|Lecturas\\s+adicionales)/i;\nconst isAbbrevHeavy = (t) => {\n  t = ensureString(t);\n  const punct = (t.match(/[;,:()/%]/g) || []).length;\n  const uppers = (t.match(/\\b[A-ZÁÉÍÓÚÑ]{2,}\\b/g) || []).length;\n  return (punct >= 18) || (uppers >= 40);\n};\n\n// === normalizador de nombre de fuente (sin \".pdf\", sin underscores, sin timestamp de import) ===\nconst prettySource = (s) => {\n  s = ensureString(s);\n  s = s.replace(/\\.pdf$/i, \"\");\n  s = s.replace(/_/g, \" \");\n  // quita sufijo tipo \"_20250101_123456\" o \" 20250101 123456\"\n  s = s.replace(/\\s*[_\\s]\\d{8}[_\\s]\\d{6}\\s*$/,'');\n  return s.trim();\n};\n\n// === helper para “página confiable” ===\n// Muchos loaders guardan page_number=0 como “desconocido”; evitamos el falso “(p. 1)”.\nconst pageDisplayOrNull = (row) => {\n  const cands = [\n    row.page_number,\n    row.page,\n    row.pageIndex,\n    row.page_idx,\n  ].map(n => Number(n));\n  const raw = cands.find(n => Number.isFinite(n));\n  if (!Number.isFinite(raw)) return null;\n  return (raw >= 1) ? (raw + 1) : null; // si es 0, tratamos como “desconocido”\n};\n\nlet bestSim = 0;\nfor (const r of rows) bestSim = Math.max(bestSim, Number(r.similarity || 0));\nconst MIN_SIM = 0.12;\nconst RELAX   = 0.12;\n\nconst keywordScore = (text) => {\n  const words = toWords(text);\n  let score = 0;\n  for (const w of words) if (userWords.has(w)) score += 1;\n  return score;\n};\n\nconst candidates = [];\nfor (const r of rows) {\n  const text = clean(r.chunk || r.chunk_text || \"\");\n  const sim = Number(r.similarity || r.score || 0);\n  const longOK   = text.length >= 160;\n  const notAdmin = !ADMIN_RE.test(text);\n  const notRef   = !REF_RE.test(text);\n  const notAbbr  = !isAbbrevHeavy(text);\n  const simOK    = sim >= Math.max(MIN_SIM, bestSim - RELAX);\n  const kscore   = keywordScore(text);\n  const hasSignal= (kscore >= 1) || (sim >= 0.22);\n\n  if (simOK && longOK && notAdmin && notRef && notAbbr && hasSignal) {\n    const alpha = 0.7, beta = 0.3;\n    const combined = alpha * sim + beta * (Math.min(kscore, 30) / 30);\n    candidates.push({ ...r, cleaned: text, sim, kscore, combined, reason: \"main\" });\n  }\n}\n\nlet pool = candidates;\nif (pool.length === 0) {\n  for (const r of rows) {\n    const text = clean(r.chunk || r.chunk_text || \"\");\n    const sim = Number(r.similarity || r.score || 0);\n    const longOK   = text.length >= 140;\n    const notAdmin = !ADMIN_RE.test(text);\n    const notRef   = !REF_RE.test(text);\n    const simOK    = sim >= Math.max(0.10, bestSim - 0.18);\n    const kscore   = keywordScore(text);\n    const hasSignal= (kscore >= 1) || (sim >= 0.24);\n\n    if (simOK && longOK && notAdmin && notRef && hasSignal) {\n      const alpha = 0.65, beta = 0.35;\n      const combined = alpha * sim + beta * (Math.min(kscore, 30) / 30);\n      pool.push({ ...r, cleaned: text, sim, kscore, combined, reason: \"fallback1\" });\n    }\n  }\n}\n\nif (pool.length === 0 && rows.length > 0) {\n  const best = [...rows].sort((a,b) => Number(b.similarity||b.score||0) - Number(a.similarity||a.score||0))[0];\n  const text = clean(best.chunk || best.chunk_text || \"\");\n  pool.push({\n    ...best,\n    cleaned: text,\n    sim: Number(best.similarity || best.score || 0),\n    kscore: keywordScore(text),\n    combined: Number(best.similarity || best.score || 0),\n    reason: \"fallback2_force_best\"\n  });\n}\n\npool.sort((a,b) => (b.combined - a.combined) || (b.sim - a.sim));\n\nconst parts = [];\nconst citations = [];\nlet total = 0;\nfor (const c of pool) {\n  let snippet = c.cleaned;\n  const MAX_PER = 700;\n  if (snippet.length > MAX_PER) {\n    const cut = snippet.lastIndexOf(\". \", MAX_PER);\n    snippet = snippet.slice(0, (cut > 420 ? cut : MAX_PER)) + \"…\";\n  }\n  parts.push(snippet);\n\n  // construir cita con source “bonito” y página solo si confiable\n  const srcPretty = prettySource(c.source_name || c.source || c.source_id || '');\n  const pageDisp  = pageDisplayOrNull(c); // null si no confiable (evita “(p. 1)”)\n  citations.push({\n    source: srcPretty,\n    page: pageDisp,                // ← número humano (>=2) o null\n    chunk_index: c.chunk_index,\n    similarity: Math.round((c.sim ?? 0) * 100) / 100,\n    kscore: c.kscore,\n    picked_by: c.reason\n  });\n\n  total += snippet.length;\n  if (parts.length >= 3 || total > 1400) break;\n}\n\nconst context_text = parts.join(\"\\n\\n---\\n\\n\");\n\n// --- DEDUP de referencias (una línea por fuente) ---\nconst dedupBySource = [];\n{\n  const seenSrc = new Set();\n  for (const c of citations) {\n    const src = (c.source || '').toString();\n    if (src && !seenSrc.has(src)) {\n      seenSrc.add(src);\n      dedupBySource.push(c);\n    }\n  }\n}\n\n// Lista compacta (si luego la quieres usar en el mensaje)\nconst refs_compact = (() => {\n  // agrupa páginas por fuente (página ya es humana en 'citations.page')\n  const map = new Map();\n  for (const c of citations) {\n    const src = (c.source || '').toString();\n    if (!src) continue;\n    if (!map.has(src)) map.set(src, new Set());\n    if (typeof c.page === 'number') {\n      map.get(src).add(c.page);\n    }\n  }\n  const lines = [];\n  for (const [src, pagesSet] of map.entries()) {\n    const pages = Array.from(pagesSet).sort((a,b)=>a-b);\n    lines.push(pages.length ? `${src} (p. ${pages.join(', ')})` : src);\n  }\n  return lines;\n})();\n\nconst prev = $json || {};\nconst q_text = ensureString(prev.query_text ?? prev.question ?? userText);\n\n// Guardarraíl para el prompt del modelo\nconst GUARD = 'Si el contexto RAG no es claramente relevante a los síntomas del caso, ignóralo.';\n\nconst minOk =\n  (prev.meta?.min_ok === true)\n  ? true\n  : (() => {\n      const words = ensureString(q_text).split(/\\s+/).filter(Boolean);\n      const clinical = [\n        \"fiebre\",\"dolor\",\"tos\",\"diarrea\",\"plaquetas\",\"sangrado\",\"vómito\",\"cefalea\",\n        \"embarazo\",\"disuria\",\"orina\",\"hipertensión\",\"hipotensión\",\"mareo\",\"desmayo\",\n        \"convulsión\",\"dolor torácico\",\"disnea\"\n      ];\n      const hits = clinical.reduce((acc,k)=> acc + (q_text.toLowerCase().includes(k) ? 1 : 0), 0);\n      return (words.length >= 5) || (hits >= 2);\n    })();\n\nconst result = {\n  ...prev,\n  meta: { ...(prev.meta || {}), min_ok: minOk },\n  gate_min_ok: prev.gate_min_ok ?? minOk,\n  rag: {\n    ...(prev.rag || {}),\n    query_text: q_text || null,\n    context_text,\n    // ← ahora sin repeticiones de la misma fuente\n    citations: dedupBySource,\n    // ← versión lista para imprimir (una línea por libro, con páginas si existen)\n    refs_compact,\n    top_k: rows.length,\n    used: parts.length,\n    no_context: parts.length === 0,\n    min_ok: minOk\n  },\n  _rag_guardrail: GUARD, // ← para usar en el System Prompt\n};\n\nreturn [{ json: result }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        848,
+        192
+      ],
+      "id": "02f878c4-09c0-48e5-bfc0-b2133b260985",
+      "name": "Assemble RAG Context"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1ed12c66-e122-4c85-aaa6-e558828b44c4",
+              "leftValue": "={{$json[\"question\"]}}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "0c81a3f9-4614-4aca-9cf3-34f16f52f11d",
+              "leftValue": "={{$json[\"patient\"][\"age\"]}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "99d37791-5f58-46a0-908e-1bf8fec05cb1",
+              "leftValue": "={{ ($json[\"question\"] ?? \"\").toString().trim().length }}",
+              "rightValue": 5,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        64,
+        0
+      ],
+      "id": "2690b471-f823-47d7-b11a-006267a07bdc",
+      "name": "Check Min Data1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "==={{ \n(() => {\n  const q = $node[\"Normalize Input\"].json.question \n        || $node[\"Telegram Trigger\"].json.message?.text \n        || '';\n  const ragText = $node[\"Assemble RAG Context\"].json.rag?.context_text || '';\n  const cites = $node[\"Assemble RAG Context\"].json.rag?.citations || [];\n  return `Caso clínico: ${q}\n\nContexto RAG (si aplica):\n${ragText}\n\nCITATIONS DISPONIBLES (JSON):\n${JSON.stringify(cites, null, 2)}`.trim();\n})()\n}}\n",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "Eres un asistente clínico de triaje. Lee el caso en lenguaje natural y clasifícalo.\nDevuelve SOLO un JSON que cumpla EXACTAMENTE el esquema indicado (sin texto extra).\n\nNiveles de triaje (usa juicio clínico general):\n1 = Atención inmediata (paro, anafilaxia grave, ACV en ventana, IAM muy sugestivo, compromiso ventilatorio severo, hemorragia masiva, etc.)\n2 = Muy urgente ≤30 min (disnea importante, dolor torácico sospechoso, sepsis, quemadura grave, fractura expuesta, etc.)\n3 = Urgente ≤6 h (neumonía sospechada, dolor abdominal significativo, celulitis con fiebre, TCE con vómitos, etc.)\n4 = 24–48 h (agudos no graves: IRA alta, UTI leve, otitis, faringitis, esguince leve…)\n5 = No urgente / programable (controles, renovaciones, crónicos estables)\n\nMapea:\n1→risk_level:red, visit_type:immediate_ed\n2→orange, urgent_<=30m\n3→yellow, urgent_<=6h\n4→green, visit_24_48h\n5→blue, scheduled_or_telemed\n\nSi faltan datos, infiere lo razonable sin hacer diagnósticos definitivos.\n\nCITAS (MUY IMPORTANTE):\n- Si el contexto RAG fue usado (ver “CITATIONS DISPONIBLES” abajo), debes devolver entre 1 y 3 elementos en \"citations\", cada uno como OBJETO { \"source\": <string>, \"page\": <integer>, \"note\": <string opcional> }.\n- Usa exactamente los pares {source, page} provistos (no inventes páginas ni fuentes).\n- Si el contexto RAG NO es pertinente o está vacío, devuelve \"citations\": [].\n\nOTRAS REGLAS:\n- \"needs_doctor\": true siempre.\n- Entre 3 y 5 \"probable_conditions\" sin duplicados.\n- 4 a 6 \"recommendations\" accionables y con tiempos.\n- \"red_flags\" 0–10 según aplique.\n- No hagas diagnósticos definitivos; prioriza seguridad del paciente.\n- Si el contexto RAG no es claramente relevante, ignóralo.\n\nEJEMPLO CORRECTO DE CITATIONS:\n\"citations\": [\n  { \"source\": \"HarrisonMedicinaInterna21a.pdf\", \"page\": 123 },\n  { \"source\": \"Digestivo.pdf\", \"page\": 45 }\n]\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        1392,
+        0
+      ],
+      "id": "b0e3b00e-cb7f-42dd-b2af-f8aacd10b9ee",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1312,
+        224
+      ],
+      "id": "5547e27c-825d-42d6-a238-c882e3cd5cac",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "Ln1f0CIjlpX5ewj6",
+          "name": "OpenAi DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "={\n  \"$schema\": \"http://json-schema.org/draft-07/schema#\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"triage_level\": { \"type\": \"integer\", \"minimum\": 1, \"maximum\": 5 },\n    \"risk_level\": { \"type\": \"string\", \"enum\": [\"red\", \"orange\", \"yellow\", \"green\", \"blue\"] },\n    \"probable_conditions\": {\n      \"type\": \"array\",\n      \"items\": { \"type\": \"string\" },\n      \"maxItems\": 5\n    },\n    \"recommendations\": {\n      \"type\": \"array\",\n      \"items\": { \"type\": \"string\" },\n      \"maxItems\": 6\n    },\n    \"red_flags\": {\n      \"type\": \"array\",\n      \"items\": { \"type\": \"string\" },\n      \"maxItems\": 12\n    },\n    \"needs_doctor\": { \"type\": \"boolean\" },\n    \"visit_type\": {\n      \"type\": \"string\",\n      \"enum\": [\"immediate_ed\", \"urgent_<=30m\", \"urgent_<=6h\", \"visit_24_48h\", \"scheduled_or_telemed\"]\n    },\n    \"citations\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"source\": { \"type\": \"string\" },\n          \"page\": { \"type\": \"integer\" },\n          \"note\": { \"type\": \"string\" }\n        }\n      }\n    },\n    \"codes\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"cie10\": { \"type\": \"array\", \"items\": { \"type\": \"string\" } },\n        \"cups\":  { \"type\": \"array\", \"items\": { \"type\": \"string\" } },\n        \"meds\":  { \"type\": \"array\", \"items\": { \"type\": \"string\" } }\n      },\n      \"required\": [\"cie10\", \"cups\", \"meds\"]\n    }\n  },\n  \"required\": [\n    \"triage_level\",\n    \"risk_level\",\n    \"probable_conditions\",\n    \"recommendations\",\n    \"red_flags\",\n    \"needs_doctor\",\n    \"visit_type\",\n    \"citations\",\n    \"codes\"\n  ]\n}\n"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1600,
+        224
+      ],
+      "id": "1c3b7800-e194-4006-bcf6-0d5e3059bde4",
+      "name": "Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate/Normalize Output — per item (tolerante a { output: {...} })\nconst d = $json || {};\n\n// ----------- localizar el payload clínico -----------------\nlet src = null;\nif (d && typeof d === 'object') {\n  if (d.output && typeof d.output === 'object') src = d.output;\n  else if (d.received?.output && typeof d.received.output === 'object') src = d.received.output;\n  else if (d.data?.output && typeof d.data.output === 'object') src = d.data.output;\n  else if (d.__debug?.received?.output && typeof d.__debug.received.output === 'object') src = d.__debug.received.output;\n}\n\n// fallback: intenta parsear si vino un string JSON en ai_text / ai_text_stripped\nif (!src) {\n  const s = (d.ai_text_stripped || d.ai_text || d.__debug?.ai_text_stripped || d.__debug?.ai_text);\n  if (typeof s === 'string') {\n    try {\n      const parsed = JSON.parse(s);\n      if (parsed && typeof parsed === 'object' && parsed.output && typeof parsed.output === 'object') {\n        src = parsed.output;\n      }\n    } catch { /* ignore */ }\n  }\n}\n\n// último recurso: usa raíz\nif (!src || typeof src !== 'object') src = d;\n\n// ----------- helpers -----------------\nconst ensureArray = v => Array.isArray(v) ? v : (v ? [v] : []);\nconst uniq = arr => Array.from(new Set(ensureArray(arr).map(x => String(x).trim()))).filter(Boolean);\nconst toInt = v => { const n = Number(v); return Number.isFinite(n) ? Math.trunc(n) : NaN; };\nconst roman2int = s => {\n  s = String(s||'').toUpperCase().trim();\n  const map = {I:1,V:5,X:10,L:50,C:100,D:500,M:1000};\n  if (!/^[IVXLCDM]+$/.test(s)) return NaN;\n  let total=0, prev=0;\n  for (let i=s.length-1;i>=0;i--) { const val=map[s[i]]; total += (val<prev) ? -val : (prev=val, val); }\n  return total;\n};\n\n// limpia nombres de fuente para presentación (genérico, sin depender de un libro específico)\nconst cleanSourceName = raw => {\n  if (!raw) return '';\n  let s = String(raw).trim();\n\n  // tomar solo el nombre base (por si viene con ruta)\n  s = s.replace(/\\\\/g, '/').split('/').pop();\n\n  // quitar extensión .pdf (u otras conocidas si hiciera falta)\n  s = s.replace(/\\.(pdf|PDF)$/i, '');\n\n  // quitar sufijos de timestamp/renombrado tipo \"__20250910_110111\" o \"_20250910_110111\"\n  s = s.replace(/(__|\\b_|-)?\\d{4}(?:\\d{2}){2}[_-]\\d{6,}(?:[_-]\\d+)?$/,''); // YYYYMMDD_HHMMSS...\n  s = s.replace(/(__|\\b_|-)?\\d{8,}$/,''); // colas solo numéricas largas\n\n  // normalizar underscores/guiones y espacios múltiples\n  s = s.replace(/[_\\-]+/g, ' ').replace(/\\s{2,}/g, ' ').trim();\n\n  return s;\n};\n\n// ----------- triage_level y risk_level -----------------\nlet levelRaw = src.triage_level ?? src.triage ?? src.level ?? '';\nlet level = toInt(levelRaw);\nif (!(level>=1 && level<=5)) {\n  const maybeRoman = roman2int(levelRaw);\n  level = (maybeRoman>=1 && maybeRoman<=5) ? maybeRoman : NaN;\n}\n\nconst allowedColors = ['red','orange','yellow','green','blue'];\nconst es2en = { 'rojo':'red', 'naranja':'orange', 'amarillo':'yellow', 'verde':'green', 'azul':'blue' };\nconst mapColor = {1:'red',2:'orange',3:'yellow',4:'green',5:'blue'};\nconst invColor = {red:1,orange:2,yellow:3,green:4,blue:5};\n\nlet risk = String(src.risk_level ?? '').toLowerCase().trim();\nif (!allowedColors.includes(risk)) {\n  if (es2en[risk]) risk = es2en[risk];\n  else if (/^[1-5]$/.test(risk)) risk = mapColor[Number(risk)];\n  else risk = '';\n}\n\n// si falta uno, deriva del otro\nif (!allowedColors.includes(risk) && (level>=1 && level<=5)) risk = mapColor[level];\nif (!(level>=1 && level<=5) && allowedColors.includes(risk)) level = invColor[risk];\n\n// ----------- visit_type -----------------\nconst allowedVisit = new Set(['immediate_ed','urgent_<=30m','urgent_<=6h','visit_24_48h','scheduled_or_telemed']);\nconst fallbackVisit = lvl =>\n  lvl===1 ? 'immediate_ed' :\n  lvl===2 ? 'urgent_<=30m' :\n  lvl===3 ? 'urgent_<=6h' :\n  lvl===4 ? 'visit_24_48h' : 'scheduled_or_telemed';\nlet visit = String(src.visit_type || '').trim();\nif (!allowedVisit.has(visit)) visit = fallbackVisit((level>=1 && level<=5) ? level : 5);\n\n// ----------- listas -----------------\nlet probs = uniq(src.probable_conditions).slice(0,5);\nlet recs  = uniq(src.recommendations).slice(0,6);\nlet flags = uniq(src.red_flags).slice(0,10);\n\n// filtra recomendaciones genéricas\nconst BAD = [\n  /(informaci[oó]n|historial|s[ií]ntom)/i,\n  /(registrar|anotar|agregar|a[nñ]adir).*(s[ií]ntom|antecedentes)/i,\n  /(chequeo|evaluaci[oó]n) (general|completa)/i,\n];\nrecs = recs.filter(r => !BAD.some(rx => rx.test(r)));\n\n// ----------- citas & códigos -----------------\nlet citations = [];\nif (Array.isArray(src.citations)) {\n  citations = src.citations;\n}\n\n// normaliza si vienen como strings y limpia nombres (sin \".pdf\")\nif (Array.isArray(citations) && citations.length > 0) {\n  citations = citations.map(c => {\n    if (typeof c === 'string') {\n      return { source: cleanSourceName(c), page: 0, note: undefined };\n    }\n    const source = cleanSourceName(c.source || c.source_name || '');\n    const page = Number(c.page ?? c.page_number ?? c.pageIndex ?? c.page_idx ?? 0);\n    const note = (c.note != null) ? String(c.note) : undefined;\n    return source ? { source, page: Number.isFinite(page) ? page : 0, note } : null;\n  }).filter(Boolean);\n}\n\n/* ===================== AUTO-RELLENO DE CITAS DESDE RAG (si faltan) ===================== */\ntry {\n  const ragNode = $node[\"Assemble RAG Context\"]?.json?.rag || {};\n  const ragUsed = Number(ragNode.used || 0);\n  const ragCitations = Array.isArray(ragNode.citations) ? ragNode.citations : [];\n  if ((!citations || citations.length === 0) && ragUsed > 0 && ragCitations.length > 0) {\n    citations = ragCitations.slice(0, 3).map(c => {\n      const source = cleanSourceName(c.source || c.source_name || '');\n      const page = Number(c.page ?? c.page_number ?? c.pageIndex ?? c.page_idx ?? 0);\n      return (source && Number.isFinite(page) && page >= 0)\n        ? { source, page, note: undefined }\n        : null;\n    }).filter(Boolean);\n  }\n} catch { /* no-op */ }\n/* =================== FIN AUTO-RELLENO =================== */\n\n// limita a máx. 3 citas para mantener señal alta\nif (Array.isArray(citations) && citations.length > 3) {\n  citations = citations.slice(0, 3);\n}\n\nlet codes = (src.codes && typeof src.codes === 'object')\n  ? src.codes\n  : { cie10: [], cups: [], meds: [] };\n\n// ----------- salida -----------------\nconst out = {\n  triage_level: (level>=1 && level<=5) ? level : null,\n  risk_level: allowedColors.includes(risk) ? risk : null,\n  probable_conditions: probs,\n  recommendations: recs,\n  red_flags: flags,\n  needs_doctor: true,                 // SIEMPRE SÍ\n  visit_type: visit,\n  citations,\n  codes,\n};\n\nconst ok = !!(out.triage_level && allowedColors.includes(out.risk_level));\n\nreturn { json: { ...out, ok } };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        -16
+      ],
+      "id": "0cdd7dff-64ac-4519-bd99-a53e1e374e7c",
+      "name": "Validate/Normalize Output"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "55e890f8-86a4-4843-9a2a-f07e7ab43069",
+              "leftValue": "={{ !!$json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2048,
+        16
+      ],
+      "id": "e149c17f-dab9-444e-9779-ace0f62ba5c7",
+      "name": "Has Valid Output1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $node[\"Normalize Input\"].json.message_clean \n   || $node[\"Normalize Input\"].json.text_clean\n   || $node[\"Telegram Trigger\"].json.message?.text \n   || $json.query_text \n   || '' }}\n",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Eres un normalizador clínico agnóstico. Convierte lenguaje coloquial del paciente en términos médicos generales. Devuelve SOLO json válido con este shape exacto: {\"terms\": []} Reglas: - \"terms\": máximo 8 ítems, sustantivos o frases clínicas cortas (p. ej., \"disartria\", \"déficit neurológico\", \"dolor torácico\", \"disuria\", \"edema\", \"fiebre\", \"vómitos\", \"dolor abdominal\", \"dificultad respiratoria\"). - No diagnostiques ni uses nombres de enfermedades específicas si no se desprenden del texto; evita siglas raras. - Español, con tildes si corresponde. Sin duplicados. - Si el texto no aporta nada útil, responde {\"terms\": []}."
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        64,
+        256
+      ],
+      "id": "a62819f2-b551-4ca9-afcb-e4bee5c6fb5b",
+      "name": "Normaliza Términos"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {
+          "maxTokens": 150,
+          "responseFormat": "json_object",
+          "temperature": 0.1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        64,
+        464
+      ],
+      "id": "efdb506c-346a-4a38-afc6-41ce306c71d9",
+      "name": "OpenAI Chat Model1",
+      "credentials": {
+        "openAiApi": {
+          "id": "Ln1f0CIjlpX5ewj6",
+          "name": "OpenAi DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function norm(s){ return String(s||'').replace(/\\s+/g,' ').trim(); }\n\n// 1) Recoge la salida del LLM (objeto o string JSON)\nlet terms = [];\nlet raw = $json;\nconst candidates = [\n  raw,\n  raw?.response, raw?.text, raw?.message, raw?.output, raw?.data, raw?.content,\n  raw?.ai_text, raw?.ai_text_stripped,\n  Array.isArray(raw?.choices) ? raw.choices?.[0]?.message?.content : undefined,\n];\nfor (const c of candidates) {\n  if (!c) continue;\n  if (Array.isArray(c?.terms)) { terms = c.terms; break; }\n  if (typeof c === 'string') {\n    try {\n      const p = JSON.parse(c);\n      if (Array.isArray(p?.terms)) { terms = p.terms; break; }\n      if (Array.isArray(p?.output?.terms)) { terms = p.output.terms; break; }\n    } catch {}\n  }\n}\nterms = Array.from(new Set((terms||[]).map(norm).filter(t => t && t.length >= 3))).slice(0, 8);\n\n// 2) Expansiones agnósticas (síntomas comunes)\nconst EXPANSIONS = [\n  // Respiratorio alto/bajo\n  { test: /fiebr|febril|temperatura/i, add: ['fiebre','febril','pirexia','temperatura elevada'] },\n  { test: /tos/i,                     add: ['tos','tos seca','tos productiva','expectoración'] },\n  { test: /gargant|odinofag|farin/i,  add: ['dolor de garganta','odinofagia','faringea','faringodinia'] },\n  { test: /congest|mocos|rinor/i,     add: ['congestión nasal','rinorrea'] },\n  { test: /disne|dificultad.*resp/i,  add: ['disnea','dificultad respiratoria'] },\n\n  // Gastrointestinal\n  { test: /v[oó]mit|n[aá]usea|emesi/i,add: ['vómitos','náuseas','emesis'] },\n  { test: /diarre/i,                  add: ['diarrea','deposiciones líquidas'] },\n  { test: /dolor ab|c[oó]lic/i,       add: ['dolor abdominal','cólico abdominal'] },\n\n  // Urinario\n  { test: /orina|disuri|ardor/i,      add: ['disuria','urgencia miccional','ardor al orinar'] },\n\n  // Neuro\n  { test: /mare/i,                    add: ['mareo','inestabilidad'] },\n  { test: /cefale|cabeza/i,           add: ['cefalea','dolor de cabeza'] },\n  { test: /habla|lengua|disartr|afas/i, add: ['disartria','afasia'] },\n  { test: /dormid|hormigue|parestes/i,  add: ['parestesias'] },\n  { test: /debil|fuerza|hemipar/i,      add: ['déficit neurológico focal','hemiparesia'] },\n  { test: /cara|boca|comisur|asimetr/i, add: ['asimetría facial'] },\n\n  // Cardiovascular\n  { test: /pecho|tor[aá]c/i,          add: ['dolor torácico','opresión torácica'] },\n  { test: /palpit/i,                  add: ['palpitaciones'] },\n  { test: /sudor|diafor/i,            add: ['diaforesis'] },\n\n  // Piel/músculo\n  { test: /erup|rash|exant/i,         add: ['erupción','exantema','lesiones cutáneas'] },\n  { test: /articul|hinchaz|edem/i,    add: ['dolor articular','artralgia','edema articular'] },\n];\n\n// 3) Construye términos finales (incluye inferencia desde el texto bruto por resiliencia)\nconst rawText = (\n  $node[\"Normalize Input\"]?.json?.message_clean ||\n  $node[\"Normalize Input\"]?.json?.text_clean ||\n  $node[\"Telegram Trigger\"]?.json?.message?.text || ''\n);\n\nlet expanded = new Set(terms);\nfor (const t of terms) for (const ex of EXPANSIONS) if (ex.test.test(t)) ex.add.forEach(x => expanded.add(x));\nfor (const ex of EXPANSIONS) if (ex.test.test(rawText)) ex.add.forEach(x => expanded.add(x));\n\nconst finalTerms = Array.from(expanded).map(norm).filter(Boolean).slice(0, 16);\n\n// 4) Positivos ponderados (frases valen 2–3 puntos; tokens 1)\nconst posParts = [];\nfor (const t of finalTerms) {\n  const safe = t.replace(/'/g, \"''\");\n  const weight = /\\s/.test(t) ? (t.length >= 12 ? 3 : 2) : 1; // frase larga > corta > token\n  posParts.push(`(${weight}) * (CASE WHEN k.content ILIKE '%${safe}%' THEN 1 ELSE 0 END)`);\n}\nconst kw_sum_sql = posParts.length ? posParts.join(' + ') : '0';\n\n// 5) Negativos genéricos (solo si el input NO habla de viajes)\nconst talksTravel = /viaj|turist|africa|safari|regres[óo]|extranj|pa[ií]s/i.test(rawText);\nconst NEG_BASE = talksTravel ? [] : [\n  'viaje','viajero','viajeros','África','africana','subsahariana','post-viaje','postviaje',\n  'Access Provided by', 'http://', 'https://', 'bookid='\n];\nconst negParts = NEG_BASE.map(w => {\n  const safe = w.replace(/'/g, \"''\");\n  return `(CASE WHEN k.content ILIKE '%${safe}%' THEN 1 ELSE 0 END)`;\n});\nconst kw_sum_neg_sql = negParts.length ? negParts.join(' + ') : '0';\n\nreturn [{ json: { kw_sum_sql, kw_sum_neg_sql, terms, expanded_terms: finalTerms } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        256
+      ],
+      "id": "68c9dd84-d369-4130-bcf6-eeac2ae96f8e",
+      "name": "Build KW SQL"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Check Min Data1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse JSON": {
+      "main": [
+        [
+          {
+            "node": "Validate/Normalize Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request (Embeddings)": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Assemble RAG Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble RAG Context": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Min Data1": {
+      "main": [
+        [
+          {
+            "node": "TG Send — Pedir datos",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normaliza Términos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate/Normalize Output": {
+      "main": [
+        [
+          {
+            "node": "Has Valid Output1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Valid Output1": {
+      "main": [
+        [
+          {
+            "node": "TG Send — Respuesta IA",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send (Error amable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Normaliza Términos",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normaliza Términos": {
+      "main": [
+        [
+          {
+            "node": "Build KW SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build KW SQL": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request (Embeddings)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": false,
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "ee89bc1b-f3a0-4723-83af-efac1f087685",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "26c5b7ffa6d42a43f69cb24f731969e90a1796cf64d2684e80f4305e5149b46e"
+  },
+  "id": "k1VEXmem5pjDzTZh",
+  "tags": []
+}
