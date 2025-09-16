@@ -115,7 +115,7 @@
             {
               "id": "072847c7-561d-4b59-9b29-71e74c630dab",
               "name": "filename",
-              "value": "={{ String($json.fileName || $json.filename || (($node[\"Hash File (sha256sum)\"].json.stdout || '').split(/\\s+/).pop().split('/').pop())).trim() }}\n",
+              "value": "={{ String($json.fileName || $json.filename || (($node[\"Hash File (sha256sum)\"].json.stdout || '').split(/\\s+/).pop().split('/').pop())).replace(/\\r?\\n/g, ' ').trim() }}",
               "type": "string"
             },
             {
@@ -127,7 +127,7 @@
             {
               "id": "e70351ed-c745-499a-a0d5-997efbed6749",
               "name": "src_path",
-              "value": "={{ String($json.path || $json.filePath || $json.file || (($node[\"Hash File (sha256sum)\"].json.stdout || '').split(/\\s+/).pop())).trim() }}\n",
+              "value": "={{ String($json.path || $json.filePath || $json.file || (($node[\"Hash File (sha256sum)\"].json.stdout || '').split(/\\s+/).pop())).replace(/\\r?\\n/g, ' ').trim() }}",
               "type": "string"
             }
           ]
@@ -177,7 +177,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "UPDATE kb_sources\n   SET source_path = '{{$json.clean_dest_path}}'\n WHERE source_id = {{$json.clean_source_id}};\n",
+        "query": "UPDATE kb_sources\n   SET source_path = {{ (() => {\n  const value = String($json.clean_dest_path ?? '').trim();\n  if (!value) {\n    return 'NULL';\n  }\n  return \"'\" + value.replace(/'/g, \"''\") + \"'\";\n})() }}\n WHERE source_id = {{ (() => {\n  const numeric = Number($json.clean_source_id);\n  return Number.isFinite(numeric) && numeric > 0 ? numeric : -1;\n})() }};\n",
         "options": {}
       },
       "type": "n8n-nodes-base.postgres",
@@ -260,13 +260,13 @@
             {
               "id": "6ea377cd-2a44-4d83-b516-59ad50ac69ef",
               "name": "clean_source_id",
-              "value": "={{ Number($json.source_id ?? $json.rows?.[0]?.source_id ?? -1) }}\n",
+              "value": "={{ (() => {\n  const candidates = [$json.source_id, $json.rows?.[0]?.source_id];\n  for (const raw of candidates) {\n    const numeric = Number(String(raw ?? '').replace(/\\r?\\n/g, '').trim());\n    if (Number.isFinite(numeric) && numeric > 0) {\n      return numeric;\n    }\n  }\n  return -1;\n})() }}",
               "type": "number"
             },
             {
               "id": "5d71566e-ef5c-4da5-96b8-8a4ea92a867e",
               "name": "clean_dest_path",
-              "value": "={{\n  (() => {\n    const rawDest = String($json.dest_path || '').trim();\n    if (rawDest) {\n      return rawDest;\n    }\n    const baseName = String(($json.dest_name || '').trim());\n    if (baseName) {\n      return '/data/kb/processed/' + baseName;\n    }\n    const fallback = String(($json.filename || $json.fileName || 'file').trim())\n      .normalize('NFD').replace(/[\\u0300-\\u036f]/g,'')\n      .replace(/\\.pdf$/i,'')\n      .replace(/\\s+/g,'_')\n      .replace(/[^A-Za-z0-9_.-]/g,'');\n    const stamped = fallback + '_' + $now.toFormat('yyyyLLdd_HHmmss') + '.pdf';\n    return '/data/kb/processed/' + stamped;\n  })()\n}}",
+              "value": "={{ (() => {\n  const sanitizePath = (value) => String(value ?? '').replace(/\\r?\\n/g, '').trim();\n  const rawDest = sanitizePath($json.dest_path);\n  if (rawDest) {\n    return rawDest;\n  }\n  const baseName = sanitizePath($json.dest_name);\n  if (baseName) {\n    return '/data/kb/processed/' + baseName;\n  }\n  const primaryName = sanitizePath($json.filename) || sanitizePath($json.fileName) || 'file';\n  const fallback = primaryName\n    .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/\\.pdf$/i, '')\n    .replace(/\\s+/g, '_')\n    .replace(/[^A-Za-z0-9_.-]/g, '');\n  const safeName = (fallback || 'file') + '_' + $now.toFormat('yyyyLLdd_HHmmss') + '.pdf';\n  return '/data/kb/processed/' + safeName;\n})() }}",
               "type": "string"
             }
           ]
