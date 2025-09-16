@@ -1,0 +1,551 @@
+{
+  "name": "KB Ingest Sources",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "849f4ec9-bbee-4f59-9af6-02d27f27e98a",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/data/kb/inbox/*.pdf",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        224,
+        0
+      ],
+      "id": "aac26746-3573-49b8-9cd0-628a2df394c6",
+      "name": "Read KB Inbox PDF"
+    },
+    {
+      "parameters": {
+        "command": "=sha256sum \"/data/kb/inbox/{{$json[\"fileName\"]}}\"\n"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        464,
+        0
+      ],
+      "id": "31ca74ef-ec6d-4cf7-bc91-fcaf8b93ad84",
+      "name": "Hash File (sha256sum)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO kb_sources (source_name, source_type, source_path, hash)\n  VALUES (\n    '{{$json.filename}}',\n    'pdf',\n    '{{$json.src_path}}',\n    '{{ ($node[\"Hash File (sha256sum)\"]?.json?.stdout || \"\").split(/\\s+/)[0] || \"\" }}'\n  )\n  ON CONFLICT (hash) DO NOTHING\n  RETURNING source_id\n)\nSELECT \n  COALESCE(\n    (SELECT source_id FROM ins),\n    (SELECT source_id FROM kb_sources WHERE hash = '{{ ($node[\"Hash File (sha256sum)\"]?.json?.stdout || \"\").split(/\\s+/)[0] || \"\" }}')\n  ) AS source_id,\n  (SELECT COUNT(*) > 0 FROM ins) AS inserted,\n  '{{$json.filename}}'::text AS filename,\n  '{{$json.src_path}}'::text AS src_path;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        720,
+        208
+      ],
+      "id": "edcb96a8-8ffc-4738-b037-74635d355b99",
+      "name": "Insert KB Source",
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "={{ (() => {\n  const src = String($json.src_path || $json.path || $json.filePath || $json.file || '').trim();\n  const dest = String($json.clean_dest_path || $json.dest_path || '').trim();\n  if (!src || !dest) {\n    throw new Error('Missing source/dest path for move');\n  }\n  const parts = dest.split('/');\n  if (parts.length > 1) {\n    parts.pop();\n  }\n  const destDir = parts.join('/') || '/data/kb/processed';\n  return `mkdir -p \"${destDir}\" && mv \"${src}\" \"${dest}\"`;\n})() }}"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1536,
+        656
+      ],
+      "id": "c7c8d1bb-8829-4b1e-bada-8d9059ba0059",
+      "name": "Move to Processed"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "072847c7-561d-4b59-9b29-71e74c630dab",
+              "name": "filename",
+              "value": "={{ String($json.fileName || $json.filename || (($node[\"Hash File (sha256sum)\"].json.stdout || '').split(/\\s+/).pop().split('/').pop())).replace(/\\r?\\n/g, ' ').trim() }}",
+              "type": "string"
+            },
+            {
+              "id": "d188cb3c-35f2-4ed1-9d54-84ba63af468c",
+              "name": "hash",
+              "value": "={{ String(((( $node[\"Hash File (sha256sum)\"].json.stdout || '' ).split(/\\s+/)[0]) || '')).trim() }}\n",
+              "type": "string"
+            },
+            {
+              "id": "e70351ed-c745-499a-a0d5-997efbed6749",
+              "name": "src_path",
+              "value": "={{ String($json.path || $json.filePath || $json.file || (($node[\"Hash File (sha256sum)\"].json.stdout || '').split(/\\s+/).pop())).replace(/\\r?\\n/g, ' ').trim() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        496,
+        192
+      ],
+      "id": "b0b8fcb3-ab73-4c5c-b417-10cf944ee135",
+      "name": "Assemble Meta"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0dfe3c00-84ab-4396-9d04-76af1ce54b58",
+              "name": "dest_name",
+              "value": "={{\n  (\n    String($json.filename || $json.fileName || 'file.pdf').trim()\n      .normalize('NFD').replace(/[\\u0300-\\u036f]/g,'') // sin tildes\n      .replace(/\\.pdf$/i,'')                           // quita .pdf\n      .replace(/\\s+/g,'_')                             // espacios -> _\n      .replace(/[^A-Za-z0-9_.-]/g,'')                  // limpia raros\n  ) + '_' + $now.toFormat('yyyyLLdd_HHmmss') + '.pdf'\n}}\n",
+              "type": "string"
+            },
+            {
+              "id": "eeee301b-551a-4c10-8962-bff072850d7f",
+              "name": "",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        976,
+        464
+      ],
+      "id": "5d348ce9-b6a7-485a-a1a5-e1558b80673e",
+      "name": "Plan Move Name"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE kb_sources\n   SET source_path = {{ (() => {\n  const value = String($json.clean_dest_path ?? '').trim();\n  if (!value) {\n    return 'NULL';\n  }\n  return \"'\" + value.replace(/'/g, \"''\") + \"'\";\n})() }}\n WHERE source_id = {{ (() => {\n  const numeric = Number($json.clean_source_id);\n  return Number.isFinite(numeric) && numeric > 0 ? numeric : -1;\n})() }};\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2992,
+        656
+      ],
+      "id": "cbae99b6-2291-4ca8-a957-110f9a948a39",
+      "name": "Update Source Path",
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c0d9bbd3-2c22-46d7-b4f5-dd784397b3af",
+              "name": "dest_path",
+              "value": "={{ '/data/kb/processed/' + String($json.dest_name || '').trim() }}\n",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1168,
+        464
+      ],
+      "id": "8a2f961a-a5bc-4a55-b635-f17f04375f72",
+      "name": "Build Dest Path"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6ea377cd-2a44-4d83-b516-59ad50ac69ef",
+              "name": "clean_source_id",
+              "value": "={{ (() => {\n  const candidates = [$json.source_id, $json.rows?.[0]?.source_id];\n  for (const raw of candidates) {\n    const numeric = Number(String(raw ?? '').replace(/\\r?\\n/g, '').trim());\n    if (Number.isFinite(numeric) && numeric > 0) {\n      return numeric;\n    }\n  }\n  return -1;\n})() }}",
+              "type": "number"
+            },
+            {
+              "id": "5d71566e-ef5c-4da5-96b8-8a4ea92a867e",
+              "name": "clean_dest_path",
+              "value": "={{ (() => {\n  const sanitizePath = (value) => String(value ?? '').replace(/\\r?\\n/g, '').trim();\n  const rawDest = sanitizePath($json.dest_path);\n  if (rawDest) {\n    return rawDest;\n  }\n  const baseName = sanitizePath($json.dest_name);\n  if (baseName) {\n    return '/data/kb/processed/' + baseName;\n  }\n  const primaryName = sanitizePath($json.filename) || sanitizePath($json.fileName) || 'file';\n  const fallback = primaryName\n    .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/\\.pdf$/i, '')\n    .replace(/\\s+/g, '_')\n    .replace(/[^A-Za-z0-9_.-]/g, '');\n  const safeName = (fallback || 'file') + '_' + $now.toFormat('yyyyLLdd_HHmmss') + '.pdf';\n  return '/data/kb/processed/' + safeName;\n})() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1728,
+        656
+      ],
+      "id": "f5d5cf39-250c-4988-80fd-ab7495119a61",
+      "name": "Coerce For Update"
+    },
+    {
+      "parameters": {
+        "command": "=python3 - <<'PY'\nimport json\nimport re\nimport subprocess\nimport sys\n\npdf_path = {{ JSON.stringify((String($json.clean_dest_path || $json.dest_path || '').trim())) }}\nif not pdf_path:\n    print(json.dumps({'error': 'missing_pdf_path', 'chunks': []}))\n    sys.exit(0)\ncmd = ['pdftotext', '-layout', '-enc', 'UTF-8', pdf_path, '-']\ntry:\n    proc = subprocess.run(cmd, capture_output=True, text=True, check=True)\nexcept FileNotFoundError:\n    print(json.dumps({'error': 'pdftotext_not_found', 'chunks': []}))\n    sys.exit(0)\nexcept subprocess.CalledProcessError as exc:\n    print(json.dumps({\n        'error': 'pdftotext_failed',\n        'stderr': (exc.stderr or '').strip(),\n        'returncode': exc.returncode,\n        'chunks': []\n    }))\n    sys.exit(0)\ntext = proc.stdout or ''\ntext_stripped = text.strip()\npages_raw = [page for page in text.split('\\f') if page.strip()]\nchunks = []\nchunk_index = 0\nmax_chunk = 1200\nmin_chunk = 180\nfor page_number, raw_page in enumerate(pages_raw, start=1):\n    page_text = raw_page.strip()\n    if not page_text:\n        continue\n    paragraphs = [p.strip() for p in re.split(r'\\n\\s*\\n+', page_text) if p.strip()]\n    buffer = ''\n    for para in paragraphs:\n        segments = [para[i:i + max_chunk] for i in range(0, len(para), max_chunk)] or ['']\n        for segment in segments:\n            piece = segment.strip()\n            if not piece:\n                continue\n            candidate = f\"{buffer}\\n\\n{piece}\".strip() if buffer else piece\n            if len(candidate) <= max_chunk:\n                buffer = candidate\n            else:\n                if buffer:\n                    chunk_index += 1\n                    chunks.append({'chunk_index': chunk_index, 'page_number': page_number, 'content': buffer})\n                buffer = piece\n    if buffer:\n        if len(buffer) < min_chunk and chunks:\n            chunks[-1]['content'] = f\"{chunks[-1]['content']}\\n\\n{buffer}\".strip()\n        else:\n            chunk_index += 1\n            chunks.append({'chunk_index': chunk_index, 'page_number': page_number, 'content': buffer})\nresult = {\n    'chunks': chunks,\n    'page_count': len(pages_raw),\n    'text_length': len(text_stripped),\n    'ocr_suspect': len(text_stripped) < 80\n}\nprint(json.dumps(result, ensure_ascii=False))\nPY"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1904,
+        656
+      ],
+      "id": "23f6b802-936a-4535-9b9f-a41ff6c0c01a",
+      "name": "Extract PDF text & chunk"
+    },
+    {
+      "parameters": {
+        "functionCode": "const item = items[0] || { json: {} };\nconst raw = item.json.stdout || '';\nlet parsed = {};\nif (raw) {\n  try {\n    parsed = JSON.parse(raw);\n  } catch (error) {\n    throw new Error('Chunk command did not return JSON: ' + raw.slice(0, 400));\n  }\n}\nconst chunks = Array.isArray(parsed.chunks) ? parsed.chunks : [];\nitem.json.chunkData = parsed;\nitem.json.chunkCount = chunks.length;\nitem.json.chunkError = parsed.error || null;\nitem.json.needsOcr = Boolean(parsed.ocr_suspect) || chunks.length === 0 || Boolean(item.json.chunkError);\nitem.json.hasChunks = !item.json.needsOcr && chunks.length > 0;\nitem.json.chunkStdErr = parsed.stderr || null;\nitem.json.chunkTextLength = parsed.text_length ?? null;\nreturn items;"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2080,
+        656
+      ],
+      "id": "153fb71f-5c5b-4f09-873c-4e9136176db5",
+      "name": "Parse chunk output"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "d2ba6767-a98f-42b2-8a9b-01d61cf482ee",
+              "leftValue": "={{$json.hasChunks}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          }
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2256,
+        656
+      ],
+      "id": "7101ffb2-63fb-4120-a74f-d22684d86526",
+      "name": "Chunks disponibles?"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fd062400-ac13-442d-b8f1-1f97ed355161",
+              "name": "chunks_json",
+              "value": "={{ JSON.stringify($json.chunkData?.chunks || []).replace(/'/g, \"''\") }}",
+              "type": "string"
+            },
+            {
+              "id": "4ec1e9d6-3eff-4a75-a086-d15e5ef73e00",
+              "name": "chunk_count",
+              "value": "={{ $json.chunkCount || 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "9a53f25d-3dbd-4a94-b24f-87b70d30d524",
+              "name": "chunk_text_length",
+              "value": "={{ $json.chunkTextLength || 0 }}",
+              "type": "number"
+            },
+            {
+              "id": "68d4d0c8-fdc2-4261-bd4f-a036de00840c",
+              "name": "page_count",
+              "value": "={{ $json.chunkData?.page_count || 0 }}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2432,
+        560
+      ],
+      "id": "5991d162-72b9-400c-bb61-61bf99d01257",
+      "name": "Preparar payload de chunks"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM kb_chunks\n WHERE source_id = {{$json.clean_source_id}};\n\nWITH incoming AS (\n  SELECT\n    (chunk->>'chunk_index')::int AS chunk_index,\n    (chunk->>'page_number')::int AS page_number,\n    trim(chunk->>'content') AS content\n  FROM jsonb_array_elements('{{$json.chunks_json}}'::jsonb) AS chunk\n),\ninserted AS (\n  INSERT INTO kb_chunks (source_id, chunk_index, page_number, content)\n  SELECT\n    {{$json.clean_source_id}} AS source_id,\n    chunk_index,\n    page_number,\n    content\n  FROM incoming\n  ORDER BY chunk_index\n  RETURNING 1\n)\nSELECT\n  {{$json.clean_source_id}}::int       AS clean_source_id,\n  '{{ String($json.clean_dest_path || '').replace(/'/g, \"''\") }}'::text AS clean_dest_path,\n  {{$json.chunk_count || 0}}::int      AS chunk_count,\n  {{$json.chunk_text_length || 0}}::int AS chunk_text_length,\n  {{$json.page_count || 0}}::int       AS page_count;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2608,
+        560
+      ],
+      "id": "cc98cd99-8865-4db7-972a-ab7b599d0275",
+      "name": "Refrescar kb_chunks",
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f52dde17-fafe-4b04-a398-9d2d8a147dca",
+              "name": "chunk_warning",
+              "value": "={{ $json.chunkError ? ('Extracción fallida: ' + $json.chunkError) : 'Se detectó PDF sin texto utilizable (revisar OCR)' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2432,
+        768
+      ],
+      "id": "cf1de751-68ac-4c9c-a4ad-bf88b2d52588",
+      "name": "Marcar necesidad de OCR"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Read KB Inbox PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read KB Inbox PDF": {
+      "main": [
+        [
+          {
+            "node": "Hash File (sha256sum)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash File (sha256sum)": {
+      "main": [
+        [
+          {
+            "node": "Assemble Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert KB Source": {
+      "main": [
+        [
+          {
+            "node": "Plan Move Name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Meta": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Move Name": {
+      "main": [
+        [
+          {
+            "node": "Build Dest Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Processed": {
+      "main": [
+        [
+          {
+            "node": "Coerce For Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dest Path": {
+      "main": [
+        [
+          {
+            "node": "Move to Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coerce For Update": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF text & chunk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF text & chunk": {
+      "main": [
+        [
+          {
+            "node": "Parse chunk output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse chunk output": {
+      "main": [
+        [
+          {
+            "node": "Chunks disponibles?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunks disponibles?": {
+      "main": [
+        [
+          {
+            "node": "Preparar payload de chunks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Marcar necesidad de OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar payload de chunks": {
+      "main": [
+        [
+          {
+            "node": "Refrescar kb_chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refrescar kb_chunks": {
+      "main": [
+        [
+          {
+            "node": "Update Source Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar necesidad de OCR": {
+      "main": [
+        [
+          {
+            "node": "Update Source Path",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "042cd244-2946-40eb-9487-63cd4fdf0a23",
+  "meta": {
+    "instanceId": "26c5b7ffa6d42a43f69cb24f731969e90a1796cf64d2684e80f4305e5149b46e"
+  },
+  "id": "2NDhje2080eLtFjH",
+  "tags": []
+}
