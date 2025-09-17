@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "command": "=python3 /data/scripts/extract_kb_clinical_guides.py <<PYDATA\n{{ JSON.stringify($json) }}\nPYDATA\n"
+        "command": "={{\nconst payload = JSON.stringify($json);\n`python3 /data/scripts/extract_kb_clinical_guides.py <<'PYDATA'\n${payload}\nPYDATA`\n}}"
       },
       "id": "7f113dec-5b6d-4bf8-9792-796827c08142",
       "name": "Extract & Chunk",
@@ -15,24 +15,42 @@
       ]
     },
     {
-      "parameters": {},
+      "parameters": {
+        "resource": "embedding",
+        "operation": "create",
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "text-embedding-3-small"
+        },
+        "input": "={{$json.content}}",
+        "options": {}
+      },
       "id": "8ff19619-c194-4df6-894f-59f7641ae464",
       "name": "Call OpenAI Embeddings",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.openAi",
       "typeVersion": 1,
       "position": [
-        1344,
+        1584,
         0
-      ]
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "Ln1f0CIjlpX5ewj6",
+          "name": "OpenAi DrAI"
+        }
+      }
     },
     {
-      "parameters": {},
+      "parameters": {
+        "functionCode": "// 1) Parsear stdout del extractor\nconst out = JSON.parse($json.stdout);\n\n// 2) Expandir a 1 item por chunk para poder llamar embeddings\nreturn out.chunks.map(c => ({\n  json: {\n    // datos para embeddings + insert\n    source_id: out.source_id,\n    chunk_index: c.chunk_index,\n    page_number: c.page_number ?? null,\n    content: c.content,\n    status: c.status || 'ok',\n\n    // conservar paths para mover el archivo si hace falta\n    file_path: out.file_path,\n    dest_path: out.dest_path,\n\n    // mantener longitud total por si la query la usa\n    chunk_text_length: out.text_length || 0\n  }\n}));"
+      },
       "id": "13adaab5-6cfc-41b1-841c-10df08915551",
       "name": "Prepare Chunk Payload",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [
-        1584,
+        1344,
         0
       ]
     },
@@ -47,7 +65,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        1824,
+        2064,
         0
       ],
       "credentials": {
@@ -59,14 +77,14 @@
     },
     {
       "parameters": {
-        "command": "python3 - <<'PYTHON'\nimport json\nimport os\nimport shutil\nimport sys\n\npayload = {{ JSON.stringify({\n  \"src\": $node[\"Prepare File Context\"].json.file_path,\n  \"dest\": $node[\"Prepare File Context\"].json.dest_path\n}) }}\ninfo = json.loads(payload)\nsrc = info.get('src') or ''\ndest = info.get('dest') or ''\nif not src or not os.path.exists(src):\n    print(json.dumps({'moved': False, 'reason': 'source_missing', 'src': src, 'dest': dest}))\n    sys.exit(0)\ndest_dir = os.path.dirname(dest) or '/data/kb/processed'\nos.makedirs(dest_dir, exist_ok=True)\nif os.path.exists(dest):\n    if os.path.isdir(dest):\n        print(json.dumps({'moved': False, 'reason': 'dest_is_directory', 'src': src, 'dest': dest}))\n        sys.exit(1)\n    os.remove(dest)\ntry:\n    shutil.move(src, dest)\nexcept Exception as exc:\n    print(json.dumps({'moved': False, 'reason': str(exc), 'src': src, 'dest': dest}))\n    sys.exit(1)\nprint(json.dumps({'moved': True, 'src': src, 'dest': dest}))\nPYTHON"
+        "command": "={{\nconst payload = JSON.stringify({\n  src: $json.file_path,\n  dest: $json.dest_path,\n});\n`python3 - <<'PYTHON'\nimport json\nimport os\nimport shutil\nimport sys\n\ndata = json.loads(sys.stdin.read())\nsrc = data.get('src') or ''\ndest = data.get('dest') or ''\nif not src or not os.path.exists(src):\n    print(json.dumps({'moved': False, 'reason': 'source_missing', 'src': src, 'dest': dest}))\n    sys.exit(0)\ndest_dir = os.path.dirname(dest) or '/data/kb/processed'\nos.makedirs(dest_dir, exist_ok=True)\nif os.path.exists(dest):\n    if os.path.isdir(dest):\n        print(json.dumps({'moved': False, 'reason': 'dest_is_directory', 'src': src, 'dest': dest}))\n        sys.exit(1)\n    os.remove(dest)\ntry:\n    shutil.move(src, dest)\nexcept Exception as exc:\n    print(json.dumps({'moved': False, 'reason': str(exc), 'src': src, 'dest': dest}))\n    sys.exit(1)\nprint(json.dumps({'moved': True, 'src': src, 'dest': dest}))\nPYTHON\n${payload}\nPYTHON`\n}}"
       },
       "id": "789413e7-7993-4524-80b1-58fdcb91a29a",
       "name": "Move to Processed",
       "type": "n8n-nodes-base.executeCommand",
       "typeVersion": 1,
       "position": [
-        2064,
+        2304,
         0
       ]
     },
@@ -145,22 +163,24 @@
       ],
       "id": "cbef3610-ab47-4ad5-a8f3-18b1c186b4b9",
       "name": "Prepare Extractor Input"
+    },
+    {
+      "parameters": {
+        "functionCode": "if (!items.length) {\n  return [];\n}\n\nconst chunks = items.map((it) => {\n  const embedding = Array.isArray(it.json.embedding)\n    ? it.json.embedding\n    : (() => {\n        const data = it.json.data || (it.json.body && it.json.body.data);\n        if (Array.isArray(data) && data.length) {\n          const candidate = data[0];\n          if (candidate && Array.isArray(candidate.embedding)) {\n            return candidate.embedding;\n          }\n        }\n        return undefined;\n      })();\n\n  return {\n    chunk_index: it.json.chunk_index,\n    page_number: it.json.page_number,\n    content: it.json.content,\n    status: it.json.status || 'ok',\n    embedding, // array de 1536 floats\n  };\n});\n\nreturn [{\n  json: {\n    source_id: items[0].json.source_id,\n    chunks_json: chunks,              // lo leer\u00e1 la query como jsonb\n    chunk_text_length: items[0].json.chunk_text_length || 0,\n\n    // paths para el 'move' si quieres mover desde este punto\n    file_path: items[0].json.file_path,\n    dest_path: items[0].json.dest_path\n  }\n}];"
+      },
+      "id": "332fb023-2a6a-4b24-86e3-3c603e59fcaf",
+      "name": "Repack Chunks",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1824,
+        0
+      ]
     }
   ],
   "pinData": {},
   "connections": {
     "Extract & Chunk": {
-      "main": [
-        [
-          {
-            "node": "Call OpenAI Embeddings",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Call OpenAI Embeddings": {
       "main": [
         [
           {
@@ -171,11 +191,22 @@
         ]
       ]
     },
+    "Call OpenAI Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Repack Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Prepare Chunk Payload": {
       "main": [
         [
           {
-            "node": "Insert KB Chunks",
+            "node": "Call OpenAI Embeddings",
             "type": "main",
             "index": 0
           }
@@ -183,15 +214,7 @@
       ]
     },
     "Insert KB Chunks": {
-      "main": [
-        [
-          {
-            "node": "Move to Processed",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": []
     },
     "Watch KB Inbox (File Trigger)": {
       "main": [
@@ -242,6 +265,22 @@
         [
           {
             "node": "Extract & Chunk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Repack Chunks": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Chunks",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Move to Processed",
             "type": "main",
             "index": 0
           }
