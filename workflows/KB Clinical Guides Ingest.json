@@ -1,0 +1,210 @@
+{
+  "name": "KB Clinical Guides Ingest",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "/data/kb/inbox",
+        "recursive": false,
+        "events": [
+          "add"
+        ]
+      },
+      "id": "e4eeb363-aeed-41f5-8057-a8842e1889d2",
+      "name": "Watch KB Inbox",
+      "type": "n8n-nodes-base.watch",
+      "typeVersion": 1,
+      "position": [
+        -1040,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "code": "const results = [];\nfor (const item of items) {\n  const data = item.json || {};\n  const candidates = [data.fileName, data.filename, data.name, data.file, data.path, data.filePath];\n  let fileName = '';\n  for (const raw of candidates) {\n    if (typeof raw === 'string') {\n      const trimmed = raw.split('/').pop().trim();\n      if (trimmed) {\n        fileName = trimmed;\n        break;\n      }\n    }\n  }\n  if (!fileName) {\n    fileName = 'documento';\n  }\n  let extension = '';\n  const lastDot = fileName.lastIndexOf('.');\n  if (lastDot !== -1) {\n    extension = fileName.substring(lastDot + 1).toLowerCase();\n  }\n  let filePath = '';\n  if (typeof data.path === 'string' && data.path.trim()) {\n    filePath = data.path.trim();\n  } else if (typeof data.filePath === 'string' && data.filePath.trim()) {\n    filePath = data.filePath.trim();\n  } else if (typeof data.file === 'string' && data.file.trim()) {\n    filePath = data.file.trim();\n  }\n  if (!filePath) {\n    filePath = `/data/kb/inbox/${fileName}`;\n  }\n  const destPath = `/data/kb/processed/${fileName}`;\n  const enriched = {\n    ...data,\n    file_name: fileName,\n    file_path: filePath,\n    extension,\n    source_name: fileName,\n    dest_path: destPath,\n    source_path: destPath,\n  };\n  results.push({ json: enriched });\n}\nreturn results;"
+      },
+      "id": "9d866727-cf84-4c58-8641-56f82fa50e18",
+      "name": "Prepare File Context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        -840,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO kb_sources (source_name, source_path)\nVALUES (\n  '{{ String($json.source_name || $json.file_name || \"documento\").replace(/'/g, \"''\") }}',\n  '{{ String($json.source_path || $json.dest_path || $json.file_path || '').replace(/'/g, \"''\") }}'\n)\nRETURNING source_id;"
+      },
+      "id": "462b3e52-319f-479f-9e45-ebb8d89378e8",
+      "name": "Insert KB Source",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -600,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "python3 /workspace/drai/scripts/extract_kb_clinical_guides.py <<'PYDATA'\n{{ JSON.stringify({\n  \"source_id\": (() => {\n    const candidates = [\n      $json.source_id,\n      $json.clean_source_id,\n      $json.rows?.[0]?.source_id,\n    ];\n    for (const candidate of candidates) {\n      const value = Number(candidate ?? -1);\n      if (Number.isFinite(value) && value > 0) {\n        return Math.trunc(value);\n      }\n    }\n    return -1;\n  })(),\n  \"source_name\": $node[\"Prepare File Context\"].json.source_name,\n  \"file_name\": $node[\"Prepare File Context\"].json.file_name,\n  \"file_path\": $node[\"Prepare File Context\"].json.file_path,\n  \"dest_path\": $node[\"Prepare File Context\"].json.dest_path,\n  \"extension\": $node[\"Prepare File Context\"].json.extension,\n  \"source_path\": $node[\"Prepare File Context\"].json.source_path\n}) }}\nPYDATA"
+      },
+      "id": "ef4cff68-3be5-4021-94b0-5ae27bc12b15",
+      "name": "Extract & Chunk",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -360,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "code": "const apiKey = process.env.OPENAI_API_KEY;\nconst model = 'text-embedding-3-small';\nconst output = [];\nfor (const item of items) {\n  const data = item.json || {};\n  const chunks = Array.isArray(data.chunks) ? data.chunks : [];\n  const eligible = [];\n  for (const chunk of chunks) {\n    const status = String(chunk.status || 'ok').toLowerCase();\n    const content = typeof chunk.content === 'string' ? chunk.content.trim() : '';\n    if (status === 'ok' && content) {\n      eligible.push({ chunk, content });\n    }\n  }\n  if (!apiKey) {\n    for (const entry of eligible) {\n      entry.chunk.status = 'error';\n      entry.chunk.error = 'missing_openai_api_key';\n    }\n    item.json.embedding_error = 'missing_openai_api_key';\n    output.push(item);\n    continue;\n  }\n  if (!eligible.length) {\n    output.push(item);\n    continue;\n  }\n  try {\n    const response = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.openai.com/v1/embeddings',\n      headers: {\n        Authorization: `Bearer ${apiKey}`,\n      },\n      body: {\n        model,\n        input: eligible.map((entry) => entry.content),\n      },\n      json: true,\n    });\n    const dataArray = Array.isArray(response && response.data) ? response.data : [];\n    for (let index = 0; index < eligible.length; index++) {\n      const chunk = eligible[index].chunk;\n      const embedding = dataArray[index] && Array.isArray(dataArray[index].embedding)\n        ? dataArray[index].embedding\n        : undefined;\n      if (Array.isArray(embedding) && embedding.length) {\n        chunk.embedding = embedding.map((value) => Number(value));\n        chunk.status = 'ok';\n      } else {\n        chunk.status = 'error';\n        chunk.error = 'embedding_missing';\n      }\n    }\n    item.json.embedding_model = response && response.model ? response.model : model;\n    item.json.embedding_count = dataArray.length;\n  } catch (error) {\n    const message = (error && error.message) ? error.message : 'openai_request_failed';\n    for (const entry of eligible) {\n      entry.chunk.status = 'error';\n      entry.chunk.error = message;\n    }\n    item.json.embedding_error = message;\n  }\n  output.push(item);\n}\nreturn output;"
+      },
+      "id": "dfd6a9c5-1a52-4367-9506-fda04d635219",
+      "name": "Call OpenAI Embeddings",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        -120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "code": "const preparedItems = [];\nfor (const item of items) {\n  const data = item.json || {};\n  const chunks = Array.isArray(data.chunks) ? data.chunks : [];\n  const prepared = [];\n  for (const chunk of chunks) {\n    const nextIndex = prepared.length + 1;\n    const rawIndex = Number(chunk.chunk_index);\n    const chunkIndex = Number.isFinite(rawIndex) && rawIndex > 0 ? Math.trunc(rawIndex) : nextIndex;\n    let pageNumber = Number(chunk.page_number);\n    if (!Number.isFinite(pageNumber) || pageNumber <= 0) {\n      pageNumber = 1;\n    } else {\n      pageNumber = Math.trunc(pageNumber);\n    }\n    let content = typeof chunk.content === 'string' ? chunk.content : '';\n    content = content.replace(/\u0000/g, ' ')\n      .replace(/\r/g, '\n')\n      .replace(/ /g, ' ')\n      .replace(/[\t ]+\n/g, '\n')\n      .replace(/\n{3,}/g, '\n\n')\n      .replace(/[ \t]{2,}/g, ' ')\n      .trim();\n    const status = String(chunk.status || 'ok').toLowerCase() === 'ok' ? 'ok' : 'error';\n    const preparedChunk = {\n      chunk_index: chunkIndex,\n      page_number: pageNumber,\n      content,\n      status,\n    };\n    if (Array.isArray(chunk.embedding) && chunk.embedding.length) {\n      preparedChunk.embedding = chunk.embedding.map((value) => Number(value));\n    }\n    if (chunk.error) {\n      preparedChunk.error = String(chunk.error);\n    }\n    prepared.push(preparedChunk);\n  }\n  if (!prepared.length) {\n    prepared.push({\n      chunk_index: 1,\n      page_number: 1,\n      content: '[ERROR] No se generaron fragmentos para este documento.',\n      status: 'error',\n    });\n  }\n  prepared.sort((a, b) => a.chunk_index - b.chunk_index);\n  prepared.forEach((chunk, index) => {\n    chunk.chunk_index = index + 1;\n  });\n  const okChunks = prepared.filter((chunk) => chunk.status === 'ok');\n  const textLength = okChunks.reduce((sum, chunk) => sum + chunk.content.length, 0);\n  const rows = Array.isArray(data.rows) ? data.rows : [];\n  const firstRowSource = rows.length > 0 ? rows[0].source_id : undefined;\n  const candidates = [data.source_id, data.sourceId, data.clean_source_id, firstRowSource];\n  let sourceId = -1;\n  for (const candidate of candidates) {\n    const value = Number(candidate);\n    if (Number.isFinite(value) && value > 0) {\n      sourceId = Math.trunc(value);\n      break;\n    }\n  }\n  item.json.source_id = sourceId;\n  item.json.chunks = prepared;\n  item.json.chunks_json = JSON.stringify(prepared).replace(/'/g, \"''\");\n  item.json.chunk_count = prepared.length;\n  item.json.ok_chunk_count = okChunks.length;\n  item.json.error_chunk_count = prepared.length - okChunks.length;\n  item.json.chunk_text_length = textLength;\n  preparedItems.push(item);\n}\nreturn preparedItems;"
+      },
+      "id": "bed6aecf-7171-479d-bf21-a6d7c1e5aaba",
+      "name": "Prepare Chunk Payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH payload AS (\n  SELECT\n    {{$json.source_id}}::int AS source_id,\n    '{{$json.chunks_json}}'::jsonb AS chunks_json\n),\nexpanded AS (\n  SELECT\n    payload.source_id,\n    COALESCE((chunk.value->>'chunk_index')::int, chunk.ordinality::int) AS chunk_index,\n    GREATEST(1, COALESCE((chunk.value->>'page_number')::int, 1)) AS page_number,\n    NULLIF(chunk.value->>'content', '') AS content,\n    COALESCE(NULLIF(chunk.value->>'status', ''), 'ok') AS status,\n    CASE\n      WHEN chunk.value ? 'embedding' AND jsonb_typeof(chunk.value->'embedding') = 'array'\n      THEN (\n        SELECT ARRAY_AGG(elem.value::float8 ORDER BY elem.ordinality)\n        FROM jsonb_array_elements(chunk.value->'embedding') WITH ORDINALITY AS elem(value, ordinality)\n      )::vector\n      ELSE NULL::vector\n    END AS embedding\n  FROM payload\n  CROSS JOIN LATERAL jsonb_array_elements(payload.chunks_json) WITH ORDINALITY AS chunk(value, ordinality)\n),\ndeleted AS (\n  DELETE FROM kb_chunks WHERE source_id = {{$json.source_id}} RETURNING 1\n),\ninserted AS (\n  INSERT INTO kb_chunks (source_id, chunk_index, page_number, content, status, embedding)\n  SELECT\n    source_id,\n    chunk_index,\n    page_number,\n    content,\n    status,\n    embedding\n  FROM expanded\n  ORDER BY chunk_index\n  RETURNING chunk_index\n),\nsummary AS (\n  SELECT\n    {{$json.source_id}}::int AS source_id,\n    (SELECT COUNT(*) FROM expanded) AS chunk_count,\n    (SELECT COUNT(*) FROM expanded WHERE status = 'ok') AS ok_chunks,\n    (SELECT COUNT(*) FROM expanded WHERE status <> 'ok') AS error_chunks\n )\nSELECT\n  summary.source_id,\n  summary.chunk_count,\n  summary.ok_chunks,\n  summary.error_chunks,\n  {{$json.chunk_text_length || 0}}::int AS text_length\nFROM summary;"
+      },
+      "id": "325d242f-4669-4463-bd31-fe04b350683f",
+      "name": "Insert KB Chunks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        360,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "python3 - <<'PYTHON'\nimport json\nimport os\nimport shutil\nimport sys\n\npayload = {{ JSON.stringify({\n  \"src\": $node[\"Prepare File Context\"].json.file_path,\n  \"dest\": $node[\"Prepare File Context\"].json.dest_path\n}) }}\ninfo = json.loads(payload)\nsrc = info.get('src') or ''\ndest = info.get('dest') or ''\nif not src or not os.path.exists(src):\n    print(json.dumps({'moved': False, 'reason': 'source_missing', 'src': src, 'dest': dest}))\n    sys.exit(0)\ndest_dir = os.path.dirname(dest) or '/data/kb/processed'\nos.makedirs(dest_dir, exist_ok=True)\nif os.path.exists(dest):\n    if os.path.isdir(dest):\n        print(json.dumps({'moved': False, 'reason': 'dest_is_directory', 'src': src, 'dest': dest}))\n        sys.exit(1)\n    os.remove(dest)\ntry:\n    shutil.move(src, dest)\nexcept Exception as exc:\n    print(json.dumps({'moved': False, 'reason': str(exc), 'src': src, 'dest': dest}))\n    sys.exit(1)\nprint(json.dumps({'moved': True, 'src': src, 'dest': dest}))\nPYTHON"
+      },
+      "id": "95d4d20c-fd81-4d5a-9ff6-03bb0abad92b",
+      "name": "Move to Processed",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        600,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Watch KB Inbox": {
+      "main": [
+        [
+          {
+            "node": "Prepare File Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare File Context": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert KB Source": {
+      "main": [
+        [
+          {
+            "node": "Extract & Chunk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Chunk": {
+      "main": [
+        [
+          {
+            "node": "Call OpenAI Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call OpenAI Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Prepare Chunk Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Chunk Payload": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert KB Chunks": {
+      "main": [
+        [
+          {
+            "node": "Move to Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "pinData": {},
+  "tags": []
+}
