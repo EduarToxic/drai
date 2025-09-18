@@ -1,0 +1,312 @@
+{
+  "name": "KB Ingest Sources",
+  "nodes": [
+    {
+      "parameters": {
+        "command": "=python3 /data/scripts/extract_kb_clinical_guides.py <<'PYDATA'\n{{ JSON.stringify($json) }}\nPYDATA\n"
+      },
+      "id": "6fdac369-1abb-48c4-ae11-9916fba4e43f",
+      "name": "Extract & Chunk",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1072,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// 1) Parsear stdout del extractor\nconst out = JSON.parse($json.stdout);\n\n// 2) Expandir a 1 item por chunk para poder llamar embeddings\nreturn out.chunks.map(c => ({\n  json: {\n    // datos para embeddings + insert\n    source_id: out.source_id,\n    chunk_index: c.chunk_index,\n    page_number: c.page_number ?? null,\n    content: c.content,\n    status: c.status || 'ok',\n\n    // conservar paths para mover el archivo si hace falta\n    file_path: out.file_path,\n    dest_path: out.dest_path,\n\n    // mantener longitud total por si la query la usa\n    chunk_text_length: out.text_length || 0\n  }\n}));"
+      },
+      "id": "7b662d65-b771-435b-be80-4d3aace287d2",
+      "name": "Prepare Chunk Payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1296,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH payload AS (\n  SELECT\n    {{$json.source_id}}::int AS source_id,\n    '{{ JSON.stringify($json.chunks_json) }}'::jsonb AS chunks_json\n),\nexpanded AS (\n  SELECT\n    payload.source_id,\n    COALESCE((chunk.value->>'chunk_index')::int, chunk.ordinality::int) AS chunk_index,\n    GREATEST(1, COALESCE((chunk.value->>'page_number')::int, 1)) AS page_number,\n    NULLIF(chunk.value->>'content', '') AS content,\n    CASE\n      WHEN chunk.value ? 'embedding' AND jsonb_typeof(chunk.value->'embedding') = 'array'\n      THEN (\n        SELECT ARRAY_AGG(elem.value::float8 ORDER BY elem.ordinality)\n        FROM jsonb_array_elements(chunk.value->'embedding') WITH ORDINALITY AS elem(value, ordinality)\n      )::vector\n      ELSE NULL::vector\n    END AS embedding\n  FROM payload\n  CROSS JOIN LATERAL jsonb_array_elements(payload.chunks_json) WITH ORDINALITY AS chunk(value, ordinality)\n),\ndeleted AS (\n  DELETE FROM kb_chunks WHERE source_id = {{$json.source_id}} RETURNING 1\n),\ninserted AS (\n  INSERT INTO kb_chunks (source_id, chunk_index, page_number, content, embedding)\n  SELECT\n    source_id,\n    chunk_index,\n    page_number,\n    content,\n    embedding\n  FROM expanded\n  ORDER BY chunk_index\n  RETURNING chunk_index\n),\nsummary AS (\n  SELECT\n    {{$json.source_id}}::int AS source_id,\n    (SELECT COUNT(*) FROM expanded) AS chunk_count,\n    (SELECT COUNT(*) FROM expanded) AS ok_chunks,\n    0 AS error_chunks\n)\nSELECT\n  summary.source_id,\n  summary.chunk_count,\n  summary.ok_chunks,\n  summary.error_chunks,\n  {{$json.chunk_text_length || 0}}::int AS text_length\nFROM summary;\n",
+        "options": {}
+      },
+      "id": "fdb7c149-0992-4404-ae1f-b68e90cf8e87",
+      "name": "Insert KB Chunks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2016,
+        32
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "=mv \"{{$json[\"file_path\"]}}\" \"{{$json[\"dest_path\"]}}\"\n"
+      },
+      "id": "fdeee437-1f03-4c35-a1ca-09543aed699d",
+      "name": "Move to Processed",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        2224,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "triggerOn": "folder",
+        "path": "/data/kb/inbox",
+        "events": [
+          "add"
+        ],
+        "options": {}
+      },
+      "type": "n8n-nodes-base.localFileTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "5e44a034-3ef9-4a91-ba3e-22b7a516589c",
+      "name": "Watch KB Inbox (File Trigger)"
+    },
+    {
+      "parameters": {},
+      "id": "7fb1414a-3fdf-4d2e-abab-c58869749fc6",
+      "name": "Prepare File Context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        416,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO kb_sources (source_name, source_path)\nVALUES (\n  '{{ String($json.source_name || $json.file_name || \"documento\").replace(/'/g, \"''\") }}',\n  '{{ String($json.source_path || $json.dest_path || $json.file_path || '').replace(/'/g, \"''\") }}'\n)\nRETURNING source_id;",
+        "options": {}
+      },
+      "id": "56727948-9123-47bb-b063-747c0fb8ce9f",
+      "name": "Insert KB Sources",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        624,
+        16
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $json.path || '';\nconst name = p.split('/').pop();\nconst ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';\nreturn [{\n  json: {\n    fileName: name,\n    fileExtension: ext,\n    filePath: p\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "d16330bd-05ea-4373-80a1-11710dcc9215",
+      "name": "Normalize File Info."
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $node[\"Prepare File Context\"].json;\n\nreturn [\n  {\n    json: {\n      source_id: $json.source_id,   // viene de Insert KB Sources; sin fallback,\n      source_name: ctx.fileName || \"unknown\",\n      file_name: ctx.fileName || \"unknown\",\n      file_path: ctx.filePath || \"\",\n      dest_path: ctx.filePath ? `/data/kb/processed/${ctx.fileName}` : \"\",\n      extension: (ctx.fileExtension || \"\").toLowerCase(),\n      source_path: ctx.filePath || \"\"\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        16
+      ],
+      "id": "3e8ceb13-0ddf-4882-9eb1-f628bdaf6d32",
+      "name": "Prepare Extractor Input"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Toma los datos *originales* (antes del HTTP) del nodo \"Prepare Chunk Payload\"\nconst src = $item(0).$node[\"Prepare Chunk Payload\"].json;\n\n// De cada item (respuesta del HTTP) extrae el embedding\nconst chunks = items.map((it) => {\n  // El contenido y metadatos vienen del payload original\n  const chunk_index = it.json.chunk_index ?? $json.chunk_index;\n  const page_number = it.json.page_number ?? $json.page_number;\n  const content = it.json.content ?? $json.content;\n  const status  = it.json.status  ?? $json.status ?? 'ok';\n\n  // Intentar leer el embedding de la respuesta HTTP\n  const data = it.json.data || (it.json.body && it.json.body.data);\n  const embedding = (Array.isArray(data) && data[0] && Array.isArray(data[0].embedding))\n    ? data[0].embedding\n    : it.json.embedding; // por si ya viene directo\n\n  return {\n    chunk_index,\n    page_number,\n    content,\n    status,\n    embedding, // array 1536\n  };\n});\n\nreturn [{\n  json: {\n    // ¡AQUÍ fijamos el source_id desde el nodo anterior, ya no “undefined”!\n    source_id: src.source_id,\n\n    // JSON listo para Postgres\n    chunks_json: chunks,\n\n    // opcionales útiles\n    chunk_text_length: src.chunk_text_length || 0,\n    file_path: src.file_path,\n    dest_path: src.dest_path,\n  }\n}];\n"
+      },
+      "id": "8261a5a3-35aa-4ab2-bb4c-7079de5ef250",
+      "name": "Repack Chunks",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1744,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-3-small"
+            },
+            {
+              "name": "input",
+              "value": "={{ $json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1520,
+        16
+      ],
+      "id": "9d91017f-1237-41d7-a3de-cea903c18ebb",
+      "name": "HTTP Request (embeddings)"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Extract & Chunk": {
+      "main": [
+        [
+          {
+            "node": "Prepare Chunk Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Chunk Payload": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request (embeddings)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Watch KB Inbox (File Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Normalize File Info.",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare File Context": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert KB Sources": {
+      "main": [
+        [
+          {
+            "node": "Prepare Extractor Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize File Info.": {
+      "main": [
+        [
+          {
+            "node": "Prepare File Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Extractor Input": {
+      "main": [
+        [
+          {
+            "node": "Extract & Chunk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Repack Chunks": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Chunks",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Move to Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request (embeddings)": {
+      "main": [
+        [
+          {
+            "node": "Repack Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "90a3ef9b-bbc6-4071-8b1e-660e836ef74d",
+  "meta": {
+    "instanceId": "26c5b7ffa6d42a43f69cb24f731969e90a1796cf64d2684e80f4305e5149b46e"
+  },
+  "id": "r4y9ivqG07d2616E",
+  "tags": []
+}
