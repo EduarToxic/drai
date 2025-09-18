@@ -176,7 +176,10 @@
         "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"{{$json.content || ''}}\"\n}\n",
         "options": {
           "response": {
-            "response": {}
+            "response": {
+              "responsePropertyName": "openai_response",
+              "keepResponseFormat": true
+            }
           }
         }
       },
@@ -201,7 +204,7 @@
         0,
         0
       ],
-      "disabled": true
+      "disabled": false
     },
     {
       "parameters": {
@@ -362,11 +365,21 @@
             "node": "Extract from File",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Binary → JSON",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
     },
     "Extract from File": {
+      "main": [
+        []
+      ]
+    },
+    "Binary → JSON": {
       "main": [
         [
           {
