@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "command": "=python3 /data/scripts/extract_kb_clinical_guides.py <<'PYDATA'\n{{ JSON.stringify($json) }}\nPYDATA\n"
+        "command": "mkdir -p /data/tmp && \\\npython3 /data/scripts/extract_kb_clinical_guides.py > \"/data/tmp/kb_{{$json[\"source_id\"]}}.json\" <<'PYDATA'\n{{ JSON.stringify($json) }}\nPYDATA\necho \"{\\\"file\\\":\\\"/data/tmp/kb_{{$json[\"source_id\"]}}.json\\\",\\\"source_id\\\":{{$json[\"source_id\"]}}}\"\n"
       },
       "id": "6fdac369-1abb-48c4-ae11-9916fba4e43f",
       "name": "Extract & Chunk",
@@ -16,7 +16,7 @@
     },
     {
       "parameters": {
-        "functionCode": "// 1) Parsear stdout del extractor\nconst out = JSON.parse($json.stdout);\n\n// 2) Expandir a 1 item por chunk para poder llamar embeddings\nreturn out.chunks.map(c => ({\n  json: {\n    // datos para embeddings + insert\n    source_id: out.source_id,\n    chunk_index: c.chunk_index,\n    page_number: c.page_number ?? null,\n    content: c.content,\n    status: c.status || 'ok',\n\n    // conservar paths para mover el archivo si hace falta\n    file_path: out.file_path,\n    dest_path: out.dest_path,\n\n    // mantener longitud total por si la query la usa\n    chunk_text_length: out.text_length || 0\n  }\n}));"
+        "functionCode": "// Lee la ruta del archivo JSON que dejó el extractor\nconst out = JSON.parse($json.stdout || '{}');\nif (!out.file) {\n  throw new Error('Extractor no devolvió ruta de archivo temporal (out.file).');\n}\n// Emite un único item con { file, source_id }\nreturn [{ json: { file: out.file, source_id: out.source_id } }];\n"
       },
       "id": "7b662d65-b771-435b-be80-4d3aace287d2",
       "name": "Prepare Chunk Payload",
@@ -38,7 +38,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        2016,
+        2128,
         32
       ],
       "credentials": {
@@ -57,7 +57,7 @@
       "type": "n8n-nodes-base.executeCommand",
       "typeVersion": 1,
       "position": [
-        2224,
+        2320,
         32
       ]
     },
@@ -139,14 +139,14 @@
     },
     {
       "parameters": {
-        "functionCode": "// Toma los datos *originales* (antes del HTTP) del nodo \"Prepare Chunk Payload\"\nconst src = $item(0).$node[\"Prepare Chunk Payload\"].json;\n\n// De cada item (respuesta del HTTP) extrae el embedding\nconst chunks = items.map((it) => {\n  // El contenido y metadatos vienen del payload original\n  const chunk_index = it.json.chunk_index ?? $json.chunk_index;\n  const page_number = it.json.page_number ?? $json.page_number;\n  const content = it.json.content ?? $json.content;\n  const status  = it.json.status  ?? $json.status ?? 'ok';\n\n  // Intentar leer el embedding de la respuesta HTTP\n  const data = it.json.data || (it.json.body && it.json.body.data);\n  const embedding = (Array.isArray(data) && data[0] && Array.isArray(data[0].embedding))\n    ? data[0].embedding\n    : it.json.embedding; // por si ya viene directo\n\n  return {\n    chunk_index,\n    page_number,\n    content,\n    status,\n    embedding, // array 1536\n  };\n});\n\nreturn [{\n  json: {\n    // ¡AQUÍ fijamos el source_id desde el nodo anterior, ya no “undefined”!\n    source_id: src.source_id,\n\n    // JSON listo para Postgres\n    chunks_json: chunks,\n\n    // opcionales útiles\n    chunk_text_length: src.chunk_text_length || 0,\n    file_path: src.file_path,\n    dest_path: src.dest_path,\n  }\n}];\n"
+        "functionCode": "const chunkItems = $items(\"Binary → JSON\", 0, $runIndex) || [];\nconst firstChunk = chunkItems[0] ? chunkItems[0].json : {};\n\nif (firstChunk.no_chunks) {\n  return [{\n    json: {\n      source_id: firstChunk.source_id ?? $json.source_id,\n      chunks_json: [],\n      chunk_text_length: firstChunk.chunk_text_length || 0,\n      file_path: firstChunk.file_path || null,\n      dest_path: firstChunk.dest_path || null,\n      no_chunks: true,\n    },\n  }];\n}\n\nif (!items.length) {\n  return [{\n    json: {\n      source_id: firstChunk.source_id ?? $json.source_id,\n      chunks_json: [],\n      chunk_text_length: firstChunk.chunk_text_length || 0,\n      file_path: firstChunk.file_path || null,\n      dest_path: firstChunk.dest_path || null,\n      no_chunks: firstChunk.no_chunks || false,\n    },\n  }];\n}\n\nconst chunks = items.map((it, index) => {\n  const original = chunkItems[index] ? chunkItems[index].json : {};\n  const data = it.json.data || (it.json.body && it.json.body.data);\n  const embedding = (Array.isArray(data) && data[0] && Array.isArray(data[0].embedding))\n    ? data[0].embedding\n    : (Array.isArray(it.json.embedding) ? it.json.embedding : undefined);\n\n  return {\n    chunk_index: original.chunk_index ?? it.json.chunk_index,\n    page_number: original.page_number ?? it.json.page_number,\n    content: original.content ?? it.json.content ?? '',\n    status: original.status ?? it.json.status ?? 'ok',\n    embedding,\n  };\n});\n\nreturn [{\n  json: {\n    source_id: firstChunk.source_id ?? $json.source_id,\n    chunks_json: chunks,\n    chunk_text_length: firstChunk.chunk_text_length || 0,\n    file_path: firstChunk.file_path || null,\n    dest_path: firstChunk.dest_path || null,\n  },\n}];\n"
       },
       "id": "8261a5a3-35aa-4ab2-bb4c-7079de5ef250",
       "name": "Repack Chunks",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [
-        1744,
+        1920,
         32
       ]
     },
@@ -185,11 +185,41 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1520,
-        16
+        1712,
+        32
       ],
       "id": "9d91017f-1237-41d7-a3de-cea903c18ebb",
       "name": "HTTP Request (embeddings)"
+    },
+    {
+      "id": "e11e209e-3814-45dd-beac-17f9705a0fd5",
+      "name": "Read KB Temp JSON",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1424,
+        32
+      ],
+      "parameters": {
+        "operation": "readBinary",
+        "filePath": "={{ $json[\"file\"] }}",
+        "options": {
+          "binaryProperty": "data"
+        }
+      }
+    },
+    {
+      "id": "e71b5f6e-a299-40fa-8bf6-f91a12f036e6",
+      "name": "Binary → JSON",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1568,
+        32
+      ],
+      "parameters": {
+        "functionCode": "// 1) Leer el binario 'data' como string\nconst bin = $binary.data;\nif (!bin || !bin.data) throw new Error('No llegó binary[data] desde Read/Write Files from Disk.');\n\nconst buff = Buffer.from(bin.data, bin.encoding || 'base64');\nconst text = buff.toString('utf8');\n\n// 2) Parsear JSON grande del extractor\nconst big = JSON.parse(text);\n\n// Estructura esperada: { source_id, file_path, dest_path, page_count, text_length, chunks: [...] }\nconst sourceId = big.source_id || $json.source_id;\n\n// 3) Expandir a items por chunk (stream-friendly)\nconst items = [];\nfor (const c of (big.chunks || [])) {\n  items.push({\n    json: {\n      source_id: sourceId,\n      chunk_index: c.chunk_index,\n      page_number: (c.page_number ?? c.page ?? c.pageIndex ?? c.page_idx) || null,\n      content: c.content || '',\n      status: c.status || 'ok',\n      file_path: big.file_path || null,\n      dest_path: big.dest_path || null,\n      chunk_text_length: big.text_length || 0,\n    },\n  });\n}\n\n// Si por alguna razón vienen 0 chunks, lanzar aviso controlado\nif (items.length === 0) {\n  // Deja al menos un item con metadata para no cortar flujo\n  items.push({ json: { source_id: sourceId, no_chunks: true } });\n}\n\nreturn items;\n"
+      }
     }
   ],
   "pinData": {},
@@ -209,7 +239,7 @@
       "main": [
         [
           {
-            "node": "HTTP Request (embeddings)",
+            "node": "Read KB Temp JSON",
             "type": "main",
             "index": 0
           }
@@ -292,6 +322,28 @@
         [
           {
             "node": "Repack Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read KB Temp JSON": {
+      "main": [
+        [
+          {
+            "node": "Binary → JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Binary → JSON": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request (embeddings)",
             "type": "main",
             "index": 0
           }
