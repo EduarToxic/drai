@@ -139,7 +139,7 @@
     },
     {
       "parameters": {
-        "functionCode": "// Repack Chunks — combina el embedding devuelto por OpenAI\n// con los metadatos del item original que entró al HTTP,\n// tomándolos del nodo \"Loop Over Items\" (ajusta el nombre si difiere).\n\n// 1) Toma el item original (el que tenía source_id, page_number, content, etc.)\nconst loopItems = $items(\"Loop Over Items\", 0, $runIndex) || [];\nconst original = loopItems[0]?.json || {};\n\n// En tu flujo, los metadatos están bajo original.data.*\n// (si no, usa original.* como fallback)\nconst meta = original.data ?? original;\n\n// 2) Toma la respuesta del HTTP (este nodo ejecuta después del HTTP)\nconst resp = $json;\n\n// Extrae el embedding de la forma estándar del endpoint de OpenAI\n// resp.data[0].embedding\nlet embedding;\nif (Array.isArray(resp?.data) && resp.data[0] && Array.isArray(resp.data[0].embedding)) {\n  embedding = resp.data[0].embedding;\n} else if (Array.isArray(resp?.embedding)) {\n  // fallback por si tienes otra forma\n  embedding = resp.embedding;\n}\n\n// 3) Arma un único chunk con los metadatos + embedding\nconst chunk = {\n  chunk_index: meta.chunk_index ?? 1,\n  page_number: meta.page_number ?? 1,\n  content: meta.content ?? \"\",\n  status: Array.isArray(embedding) ? \"ok\" : \"error\",\n  embedding,\n};\n\n// 4) Devuelve payload para el INSERT\nreturn [{\n  json: {\n    source_id: meta.source_id ?? null,\n    chunks_json: [chunk],\n    chunk_text_length: meta.text_length ?? 0,\n    file_path: meta.file_path ?? null,\n    dest_path: meta.dest_path ?? null,\n  },\n}];\n"
+        "functionCode": "// Combina los metadatos del chunk con la respuesta de OpenAI\nconst extractItems = $items(\"Extract from File\", 0, $runIndex) || [];\nconst original = extractItems[0]?.json ?? {};\nconst currentMeta = (() => {\n  if ($json.openai_response) {\n    const { openai_response, ...rest } = $json;\n    return rest;\n  }\n  return {};\n})();\nconst meta = {\n  ...(original.data ?? original),\n  ...currentMeta,\n};\n\nconst resp = $json.openai_response ?? $json;\nlet embedding;\n\nif (Array.isArray(resp?.data) && resp.data[0] && Array.isArray(resp.data[0].embedding)) {\n  embedding = resp.data[0].embedding;\n} else if (Array.isArray(resp?.embedding)) {\n  embedding = resp.embedding;\n}\n\nconst chunk = {\n  chunk_index: meta.chunk_index ?? meta.chunkIndex ?? 1,\n  page_number: meta.page_number ?? meta.pageNumber ?? 1,\n  content: meta.content ?? '',\n  status: Array.isArray(embedding) ? (meta.status ?? 'ok') : 'error',\n  embedding,\n};\n\nconst chunkTextLength =\n  meta.chunk_text_length ??\n  meta.chunkTextLength ??\n  (typeof chunk.content === 'string' ? chunk.content.length : 0);\n\nconst totalTextLength =\n  meta.text_length ??\n  meta.textLength ??\n  chunkTextLength;\n\nconst output = {\n  source_id: meta.source_id ?? meta.sourceId ?? null,\n  source_name: meta.source_name ?? meta.sourceName ?? null,\n  file_name: meta.file_name ?? meta.fileName ?? null,\n  file_path: meta.file_path ?? meta.filePath ?? null,\n  dest_path: meta.dest_path ?? meta.destPath ?? null,\n  source_path: meta.source_path ?? meta.sourcePath ?? null,\n  extension: meta.extension ?? null,\n  page_count: meta.page_count ?? meta.pageCount ?? null,\n  text_length: totalTextLength,\n  chunk_text_length: chunkTextLength,\n  extraction: meta.extraction ?? null,\n  chunks_json: [chunk],\n};\n\nif (meta.chunks && Array.isArray(meta.chunks)) {\n  output.chunks = meta.chunks;\n}\n\nreturn [{ json: output }];\n"
       },
       "id": "8302918c-9976-4cea-bd64-9ed3b60cc869",
       "name": "Repack Chunks",
@@ -176,7 +176,10 @@
         "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"{{$json.content || ''}}\"\n}\n",
         "options": {
           "response": {
-            "response": {}
+            "response": {
+              "responsePropertyName": "openai_response",
+              "keepResponseFormat": true
+            }
           }
         }
       },
