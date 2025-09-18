@@ -1,0 +1,391 @@
+{
+  "name": "KB Ingest Sources 5.0",
+  "nodes": [
+    {
+      "parameters": {
+        "command": "=mkdir -p /data/tmp && \\\nMETA=\"/data/tmp/meta_{{$json.source_id}}.json\" && \\\nOUT=\"/data/tmp/kb_{{$json.source_id}}.json\" && \\\nERR=\"/data/tmp/kb_{{$json.source_id}}.err\" && \\\ncat > \"$META\" <<'PYDATA'\n{{ JSON.stringify({\n  source_id: $json.source_id,\n  source_name: $json.source_name,\n  file_name: $json.file_name,\n  file_path: $json.file_path,\n  dest_path: $json.dest_path,\n  extension: $json.extension,\n  source_path: $json.source_path\n}) }}\nPYDATA\npython3 - <<'PY' \"$META\" || { echo \"Bad metadata JSON in $META\" >&2; exit 1; }\nimport sys, json\nwith open(sys.argv[1],'r',encoding='utf-8') as f:\n    json.load(f)\nprint(\"OK\", file=sys.stderr)\nPY\npython3 /data/scripts/extract_kb_clinical_guides.py < \"$META\" > \"$OUT\" 2> \"$ERR\" && \\\necho \"{\\\"file\\\":\\\"$OUT\\\",\\\"source_id\\\":{{$json.source_id}}}\" || \\\n( echo \"Extractor failed, see $ERR\" >&2; exit 1 )\n"
+      },
+      "id": "69128941-3090-4e71-86a4-176f1829b6d1",
+      "name": "Extract & Chunk",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -496,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Lee el puntero que dejó el extractor\nconst out = JSON.parse($json.stdout || '{}');\nif (!out.file) throw new Error('Extractor no devolvió ruta (out.file)');\nreturn [{ json: { file: out.file, source_id: out.source_id } }];\n"
+      },
+      "id": "dbd4c255-ebb7-484d-8488-418f264d49aa",
+      "name": "Prepare Chunk Payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        -336,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH payload AS (\n  SELECT\n    {{ $json.source_id }}::int AS source_id,\n    /* 1) Chunks con chunk_index/page_number/content */\n    $_chunks$ {{ JSON.stringify($json.chunks || []) }} $_chunks$::jsonb     AS chunks_json,\n    /* 2) Embeddings por chunk_index (puede venir incompleto) */\n    $_embeds$ {{ JSON.stringify($json.chunks_json || []) }} $_embeds$::jsonb AS embeds_json\n),\n\n/* Embeddings mapeados por chunk_index desde chunks_json */\nembed_map AS (\n  SELECT\n    COALESCE((j.value->>'chunk_index')::int, j.ordinality::int) AS chunk_index,\n    CASE\n      WHEN j.value ? 'embedding' AND jsonb_typeof(j.value->'embedding') = 'array'\n      THEN (\n        SELECT ARRAY_AGG(elem.value::float8 ORDER BY elem.ordinality)\n        FROM jsonb_array_elements(j.value->'embedding') WITH ORDINALITY AS elem(value, ordinality)\n      )::vector\n      ELSE NULL::vector\n    END AS embedding\n  FROM payload p\n  CROSS JOIN LATERAL jsonb_array_elements(p.embeds_json) WITH ORDINALITY AS j(value, ordinality)\n),\n\n/* Expandimos los CHUNKS (texto/página/índice) */\nexpanded_chunks AS (\n  SELECT\n    p.source_id,\n    COALESCE((c.value->>'chunk_index')::int, c.ordinality::int) AS chunk_index,\n    GREATEST(1, COALESCE((c.value->>'page_number')::int, 1))    AS page_number,\n    NULLIF(c.value->>'content', '')                              AS content\n  FROM payload p\n  CROSS JOIN LATERAL jsonb_array_elements(p.chunks_json) WITH ORDINALITY AS c(value, ordinality)\n),\n\n/* Unimos texto+metadatos con embedding (si existe) por chunk_index */\nmerged AS (\n  SELECT\n    e.source_id,\n    e.chunk_index,\n    e.page_number,\n    e.content,\n    m.embedding  -- puede ser NULL si no llegó ese chunk en chunks_json\n  FROM expanded_chunks e\n  LEFT JOIN embed_map m\n    ON m.chunk_index = e.chunk_index\n),\n\n/* Nos quedamos con un registro por (source_id, chunk_index) */\ndedup AS (\n  SELECT source_id, chunk_index, page_number, content, embedding\n  FROM (\n    SELECT\n      x.*,\n      ROW_NUMBER() OVER (PARTITION BY x.source_id, x.chunk_index ORDER BY x.page_number DESC) AS rn\n    FROM merged x\n  ) t\n  WHERE rn = 1\n),\n\n/* UPSERT */\nupsert AS (\n  INSERT INTO kb_chunks (source_id, chunk_index, page_number, content, embedding)\n  SELECT source_id, chunk_index, page_number, content, embedding\n  FROM dedup\n  ON CONFLICT (source_id, chunk_index)\n  DO UPDATE SET\n    page_number = EXCLUDED.page_number,\n    content     = EXCLUDED.content,\n    embedding   = COALESCE(EXCLUDED.embedding, kb_chunks.embedding)\n  RETURNING 1\n)\n\nSELECT\n  (SELECT source_id FROM payload)   AS source_id,\n  (SELECT COUNT(*) FROM dedup)      AS chunk_count,\n  (SELECT COUNT(*) FROM upsert)     AS ok_chunks,\n  0                                 AS error_chunks,\n  {{ $json.text_length || 0 }}::int AS text_length;\n",
+        "options": {}
+      },
+      "id": "b4fa8be6-1a56-45d2-9e5a-e61b0e3d38b3",
+      "name": "Insert KB Chunks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        928,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "=mv \"{{$json[\"file_path\"]}}\" \"{{$json[\"dest_path\"]}}\"\n"
+      },
+      "id": "46646e77-278d-48b9-9f8d-5416ea45a22b",
+      "name": "Move to Processed",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        912,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "triggerOn": "folder",
+        "path": "/data/kb/inbox",
+        "events": [
+          "add"
+        ],
+        "options": {}
+      },
+      "type": "n8n-nodes-base.localFileTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1568,
+        448
+      ],
+      "id": "d9b3d5de-9a32-4002-9138-32a1cce6f961",
+      "name": "Watch KB Inbox (File Trigger)"
+    },
+    {
+      "parameters": {},
+      "id": "5d7132a3-d550-4e17-bdab-45058fe595ad",
+      "name": "Prepare File Context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        -1152,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO kb_sources (source_name, source_path)\nVALUES (\n  '{{ String($json.source_name || $json.file_name || \"documento\").replace(/'/g, \"''\") }}',\n  '{{ String($json.source_path || $json.dest_path || $json.file_path || '').replace(/'/g, \"''\") }}'\n)\nRETURNING source_id;",
+        "options": {}
+      },
+      "id": "9c0bd21b-4364-4d40-965e-d25cb7b04437",
+      "name": "Insert KB Sources",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -944,
+        464
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "j4uy2P7wwsJyISqB",
+          "name": "Postgres DrAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $json.path || '';\nconst name = p.split('/').pop();\nconst ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';\nreturn [{\n  json: {\n    fileName: name,\n    fileExtension: ext,\n    filePath: p\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1360,
+        448
+      ],
+      "id": "8b483ed7-10df-41f3-96a1-746b869ec7b8",
+      "name": "Normalize File Info."
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $node[\"Prepare File Context\"].json;\n\nreturn [\n  {\n    json: {\n      source_id: $json.source_id,   // viene de Insert KB Sources; sin fallback,\n      source_name: ctx.fileName || \"unknown\",\n      file_name: ctx.fileName || \"unknown\",\n      file_path: ctx.filePath || \"\",\n      dest_path: ctx.filePath ? `/data/kb/processed/${ctx.fileName}` : \"\",\n      extension: (ctx.fileExtension || \"\").toLowerCase(),\n      source_path: ctx.filePath || \"\"\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -736,
+        464
+      ],
+      "id": "0b00b41d-37ea-46d1-95c3-4bfe74f8f96f",
+      "name": "Prepare Extractor Input"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Combina los metadatos del chunk con la respuesta de OpenAI\nconst extractItems = $items(\"Extract from File\", 0, $runIndex) || [];\nconst original = extractItems[0]?.json ?? {};\nconst currentMeta = (() => {\n  if ($json.openai_response) {\n    const { openai_response, ...rest } = $json;\n    return rest;\n  }\n  return {};\n})();\nconst meta = {\n  ...(original.data ?? original),\n  ...currentMeta,\n};\n\nconst resp = $json.openai_response ?? $json;\nlet embedding;\n\nif (Array.isArray(resp?.data) && resp.data[0] && Array.isArray(resp.data[0].embedding)) {\n  embedding = resp.data[0].embedding;\n} else if (Array.isArray(resp?.embedding)) {\n  embedding = resp.embedding;\n}\n\nconst chunk = {\n  chunk_index: meta.chunk_index ?? meta.chunkIndex ?? 1,\n  page_number: meta.page_number ?? meta.pageNumber ?? 1,\n  content: meta.content ?? '',\n  status: Array.isArray(embedding) ? (meta.status ?? 'ok') : 'error',\n  embedding,\n};\n\nconst chunkTextLength =\n  meta.chunk_text_length ??\n  meta.chunkTextLength ??\n  (typeof chunk.content === 'string' ? chunk.content.length : 0);\n\nconst totalTextLength =\n  meta.text_length ??\n  meta.textLength ??\n  chunkTextLength;\n\nconst output = {\n  source_id: meta.source_id ?? meta.sourceId ?? null,\n  source_name: meta.source_name ?? meta.sourceName ?? null,\n  file_name: meta.file_name ?? meta.fileName ?? null,\n  file_path: meta.file_path ?? meta.filePath ?? null,\n  dest_path: meta.dest_path ?? meta.destPath ?? null,\n  source_path: meta.source_path ?? meta.sourcePath ?? null,\n  extension: meta.extension ?? null,\n  page_count: meta.page_count ?? meta.pageCount ?? null,\n  text_length: totalTextLength,\n  chunk_text_length: chunkTextLength,\n  extraction: meta.extraction ?? null,\n  chunks_json: [chunk],\n};\n\nif (meta.chunks && Array.isArray(meta.chunks)) {\n  output.chunks = meta.chunks;\n}\n\nreturn [{ json: output }];\n"
+      },
+      "id": "5611a0c9-61de-487b-8bc4-0fe2b5f49c39",
+      "name": "Repack Chunks",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        592,
+        432
+      ],
+      "retryOnFail": false,
+      "executeOnce": false,
+      "alwaysOutputData": false,
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "=Authorization",
+              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"{{$json.content || ''}}\"\n}\n",
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        384,
+        416
+      ],
+      "id": "bf932f62-3e2b-4dc9-b3da-43ddbd45f847",
+      "name": "HTTP Request (embeddings)"
+    },
+    {
+      "parameters": {
+        "functionCode": "// 1) Leer el binario 'data' como string\nconst bin = $binary.data;\nif (!bin || !bin.data) throw new Error('No llegó binary[data] desde Read/Write Files from Disk.');\n\nconst buff = Buffer.from(bin.data, bin.encoding || 'base64');\nconst text = buff.toString('utf8');\n\n// 2) Parsear JSON grande del extractor\nconst big = JSON.parse(text);\n\n// Estructura esperada: { source_id, file_path, dest_path, page_count, text_length, chunks: [...] }\nconst sourceId = big.source_id || $json.source_id;\n\n// 3) Expandir a items por chunk (stream-friendly)\nconst items = [];\nfor (const c of (big.chunks || [])) {\n  items.push({\n    json: {\n      source_id: sourceId,\n      chunk_index: c.chunk_index,\n      page_number: (c.page_number ?? c.page ?? c.pageIndex ?? c.page_idx) || null,\n      content: c.content || '',\n      status: c.status || 'ok',\n      file_path: big.file_path || null,\n      dest_path: big.dest_path || null,\n      chunk_text_length: big.text_length || 0,\n    },\n  });\n}\n\n// Si por alguna razón vienen 0 chunks, lanzar aviso controlado\nif (items.length === 0) {\n  // Deja al menos un item con metadata para no cortar flujo\n  items.push({ json: { source_id: sourceId, no_chunks: true } });\n}\n\nreturn items;\n"
+      },
+      "id": "c7dffa5d-54d1-4746-8f4d-1fe58eb316e2",
+      "name": "Binary → JSON",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{$json[\"file\"]}}",
+        "options": {
+          "dataPropertyName": "data"
+        }
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        416
+      ],
+      "id": "c9c7b8a5-b3b7-435f-8adf-4dad11c073e9",
+      "name": "Read/Write Files from Disk",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "fromJson",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        144,
+        416
+      ],
+      "id": "1c971e89-2209-4a81-8060-98a0540d89fe",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map((item, index) => {\n  const input = item.json; // viene de Extract from File (con content, page_number, etc.)\n  const embedding = $json[\"data\"][0][\"embedding\"]; // respuesta de OpenAI\n\n  return {\n    json: {\n      source_id: input.source_id,\n      chunk_index: input.chunk_index,\n      page_number: input.page_number,\n      content: input.content,\n      status: \"ok\",\n      embedding: embedding,\n    }\n  };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -192,
+        32
+      ],
+      "id": "ac688dfa-4785-4268-9421-2438404e582f",
+      "name": "Code in JavaScript",
+      "disabled": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Extract & Chunk": {
+      "main": [
+        [
+          {
+            "node": "Prepare Chunk Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Chunk Payload": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Watch KB Inbox (File Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Normalize File Info.",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare File Context": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert KB Sources": {
+      "main": [
+        [
+          {
+            "node": "Prepare Extractor Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize File Info.": {
+      "main": [
+        [
+          {
+            "node": "Prepare File Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Extractor Input": {
+      "main": [
+        [
+          {
+            "node": "Extract & Chunk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Repack Chunks": {
+      "main": [
+        [
+          {
+            "node": "Insert KB Chunks",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Move to Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request (embeddings)": {
+      "main": [
+        [
+          {
+            "node": "Repack Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read/Write Files from Disk": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request (embeddings)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c8552020-2466-40f6-a621-4fc04554bcfe",
+  "meta": {
+    "instanceId": "26c5b7ffa6d42a43f69cb24f731969e90a1796cf64d2684e80f4305e5149b46e"
+  },
+  "id": "vUWMFxpyqniQucad",
+  "tags": []
+}
