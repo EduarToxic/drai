@@ -3,7 +3,8 @@
   "nodes": [
     {
       "parameters": {
-        "command": "=mkdir -p /data/tmp && \\\nMETA=\"/data/tmp/meta_{{$json.source_id}}.json\" && \\\nOUT=\"/data/tmp/kb_{{$json.source_id}}.json\" && \\\nERR=\"/data/tmp/kb_{{$json.source_id}}.err\" && \\\ncat > \"$META\" <<'PYDATA'\n{{ JSON.stringify({\n  source_id: $json.source_id,\n  source_name: $json.source_name,\n  file_name: $json.file_name,\n  file_path: $json.file_path,\n  dest_path: $json.dest_path,\n  extension: $json.extension,\n  source_path: $json.source_path\n}) }}\nPYDATA\npython3 - <<'PY' \"$META\" || { echo \"Bad metadata JSON in $META\" >&2; exit 1; }\nimport sys, json\nwith open(sys.argv[1],'r',encoding='utf-8') as f:\n    json.load(f)\nprint(\"OK\", file=sys.stderr)\nPY\npython3 /data/scripts/extract_kb_clinical_guides.py < \"$META\" > \"$OUT\" 2> \"$ERR\" && \\\necho \"{\\\"file\\\":\\\"$OUT\\\",\\\"source_id\\\":{{$json.source_id}}}\" || \\\n( echo \"Extractor failed, see $ERR\" >&2; exit 1 )\n"
+        "command": "=mkdir -p /data/tmp && \\\nMETA=\"/data/tmp/meta_{{$json.source_id}}.json\" && \\\nOUT=\"/data/tmp/kb_{{$json.source_id}}.json\" && \\\nERR=\"/data/tmp/kb_{{$json.source_id}}.err\" && \\\ncat > \"$META\" <<'PYDATA'\n{{ JSON.stringify({\n  source_id: $json.source_id,\n  source_name: $json.source_name,\n  file_name: $json.file_name,\n  file_path: $json.file_path,\n  dest_path: $json.dest_path,\n  extension: $json.extension,\n  source_path: $json.source_path\n}) }}\nPYDATA\npython3 - <<'PY' \"$META\" || { echo \"Bad metadata JSON in $META\" >&2; exit 1; }\nimport sys, json\nwith open(sys.argv[1],'r',encoding='utf-8') as f:\n    json.load(f)\nprint(\"OK\", file=sys.stderr)\nPY\npython3 /data/scripts/extract_kb_clinical_guides.py < \"$META\" > \"$OUT\" 2> \"$ERR\" && \\\necho \"{\\\"file\\\":\\\"$OUT\\\",\\\"source_id\\\":{{$json.source_id}}}\" || \\\n( echo \"Extractor failed, see $ERR\" >&2; exit 1 )\n",
+        "options": {}
       },
       "id": "69128941-3090-4e71-86a4-176f1829b6d1",
       "name": "Extract & Chunk",
@@ -16,7 +17,8 @@
     },
     {
       "parameters": {
-        "functionCode": "// Lee el puntero que dej\u00f3 el extractor\nconst out = JSON.parse($json.stdout || '{}');\nif (!out.file) throw new Error('Extractor no devolvi\u00f3 ruta (out.file)');\nreturn [{ json: { file: out.file, source_id: out.source_id } }];\n"
+        "functionCode": "// Lee el puntero que dejó el extractor\nconst out = JSON.parse($json.stdout || '{}');\nif (!out.file) throw new Error('Extractor no devolvió ruta (out.file)');\nreturn [{ json: { file: out.file, source_id: out.source_id } }];\n",
+        "options": {}
       },
       "id": "dbd4c255-ebb7-484d-8488-418f264d49aa",
       "name": "Prepare Chunk Payload",
@@ -36,7 +38,7 @@
       "id": "b4fa8be6-1a56-45d2-9e5a-e61b0e3d38b3",
       "name": "Insert KB Chunks",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "typeVersion": 2,
       "position": [
         1520,
         656
@@ -50,7 +52,8 @@
     },
     {
       "parameters": {
-        "command": "=mv \"{{$json[\"file_path\"]}}\" \"{{$json[\"dest_path\"]}}\"\n"
+        "command": "=mv \"{{$json[\"file_path\"]}}\" \"{{$json[\"dest_path\"]}}\"\n",
+        "options": {}
       },
       "id": "46646e77-278d-48b9-9f8d-5416ea45a22b",
       "name": "Move to Processed",
@@ -80,7 +83,9 @@
       "name": "Watch KB Inbox (File Trigger)"
     },
     {
-      "parameters": {},
+      "parameters": {
+        "options": {}
+      },
       "id": "5d7132a3-d550-4e17-bdab-45058fe595ad",
       "name": "Prepare File Context",
       "type": "n8n-nodes-base.function",
@@ -99,7 +104,7 @@
       "id": "9c0bd21b-4364-4d40-965e-d25cb7b04437",
       "name": "Insert KB Sources",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "typeVersion": 2,
       "position": [
         -944,
         464
@@ -113,7 +118,8 @@
     },
     {
       "parameters": {
-        "jsCode": "const p = $json.path || '';\nconst name = p.split('/').pop();\nconst ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';\nreturn [{\n  json: {\n    fileName: name,\n    fileExtension: ext,\n    filePath: p\n  }\n}];\n"
+        "jsCode": "const p = $json.path || '';\nconst name = p.split('/').pop();\nconst ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';\nreturn [{\n  json: {\n    fileName: name,\n    fileExtension: ext,\n    filePath: p\n  }\n}];\n",
+        "options": {}
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -126,7 +132,8 @@
     },
     {
       "parameters": {
-        "jsCode": "const ctx = $node[\"Prepare File Context\"].json;\n\nreturn [\n  {\n    json: {\n      source_id: $json.source_id,   // viene de Insert KB Sources; sin fallback,\n      source_name: ctx.fileName || \"unknown\",\n      file_name: ctx.fileName || \"unknown\",\n      file_path: ctx.filePath || \"\",\n      dest_path: ctx.filePath ? `/data/kb/processed/${ctx.fileName}` : \"\",\n      extension: (ctx.fileExtension || \"\").toLowerCase(),\n      source_path: ctx.filePath || \"\"\n    }\n  }\n];\n"
+        "jsCode": "const ctx = $node[\"Prepare File Context\"].json;\n\nreturn [\n  {\n    json: {\n      source_id: $json.source_id,   // viene de Insert KB Sources; sin fallback,\n      source_name: ctx.fileName || \"unknown\",\n      file_name: ctx.fileName || \"unknown\",\n      file_path: ctx.filePath || \"\",\n      dest_path: ctx.filePath ? `/data/kb/processed/${ctx.fileName}` : \"\",\n      extension: (ctx.fileExtension || \"\").toLowerCase(),\n      source_path: ctx.filePath || \"\"\n    }\n  }\n];\n",
+        "options": {}
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -139,7 +146,8 @@
     },
     {
       "parameters": {
-        "functionCode": "// Repack (per-item) \u2014 lee embedding desde donde realmente llega la respuesta del HTTP\n\nconst meta = $json || {};\nconst content = typeof meta.content === \"string\" ? meta.content : \"\";\n\n// Detectar el embedding en cualquiera de estos sitios\nlet emb = null;\nif (Array.isArray(meta?.data) && Array.isArray(meta.data[0]?.embedding)) {\n  emb = meta.data[0].embedding;                 // HTTP \u2192 Response Format = JSON (en ra\u00edz)\n} else if (meta?.body && Array.isArray(meta.body?.data) && Array.isArray(meta.body.data[0]?.embedding)) {\n  emb = meta.body.data[0].embedding;            // algunas configs lo ponen en body\n} else if (meta?.openai_response && Array.isArray(meta.openai_response?.data)\n           && Array.isArray(meta.openai_response.data[0]?.embedding)) {\n  emb = meta.openai_response.data[0].embedding; // por si usas un wrapper\n} else if (Array.isArray(meta?.embedding)) {\n  emb = meta.embedding;                          // proxies\n}\n\nreturn [{\n  json: {\n    source_id:   meta.source_id   ?? null,\n    source_name: meta.source_name ?? null,\n    file_name:   meta.file_name   ?? null,\n    file_path:   meta.file_path   ?? null,\n    source_path: meta.source_path ?? null,\n    dest_path:   meta.dest_path   ?? null,\n    page_count:  meta.page_count  ?? null,\n    text_length: typeof content === \"string\" ? content.length : (meta.text_length ?? 0),\n\n    chunks_json: [{\n      chunk_index: meta.chunk_index ?? meta.chunkIndex ?? 1,\n      page_number: meta.page_number ?? meta.pageNumber ?? 1,\n      content,\n      status: Array.isArray(emb) ? \"ok\" : \"no_embedding\",\n      embedding: Array.isArray(emb) ? emb : null,\n    }],\n  }\n}];\n"
+        "functionCode": "// Repack (per-item) — lee embedding desde donde realmente llega la respuesta del HTTP\n\nconst meta = $json || {};\nconst content = typeof meta.content === \"string\" ? meta.content : \"\";\n\n// Detectar el embedding en cualquiera de estos sitios\nlet emb = null;\nif (Array.isArray(meta?.data) && Array.isArray(meta.data[0]?.embedding)) {\n  emb = meta.data[0].embedding;                 // HTTP → Response Format = JSON (en raíz)\n} else if (meta?.body && Array.isArray(meta.body?.data) && Array.isArray(meta.body.data[0]?.embedding)) {\n  emb = meta.body.data[0].embedding;            // algunas configs lo ponen en body\n} else if (meta?.openai_response && Array.isArray(meta.openai_response?.data)\n           && Array.isArray(meta.openai_response.data[0]?.embedding)) {\n  emb = meta.openai_response.data[0].embedding; // por si usas un wrapper\n} else if (Array.isArray(meta?.embedding)) {\n  emb = meta.embedding;                          // proxies\n}\n\nreturn [{\n  json: {\n    source_id:   meta.source_id   ?? null,\n    source_name: meta.source_name ?? null,\n    file_name:   meta.file_name   ?? null,\n    file_path:   meta.file_path   ?? null,\n    source_path: meta.source_path ?? null,\n    dest_path:   meta.dest_path   ?? null,\n    page_count:  meta.page_count  ?? null,\n    text_length: typeof content === \"string\" ? content.length : (meta.text_length ?? 0),\n\n    chunks_json: [{\n      chunk_index: meta.chunk_index ?? meta.chunkIndex ?? 1,\n      page_number: meta.page_number ?? meta.pageNumber ?? 1,\n      content,\n      status: Array.isArray(emb) ? \"ok\" : \"no_embedding\",\n      embedding: Array.isArray(emb) ? emb : null,\n    }],\n  }\n}];\n",
+        "options": {}
       },
       "id": "5611a0c9-61de-487b-8bc4-0fe2b5f49c39",
       "name": "Repack Chunks",
@@ -208,7 +216,7 @@
         "onError": "continueRegularOutput"
       },
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "typeVersion": 4,
       "position": [
         720,
         560
@@ -254,7 +262,8 @@
     },
     {
       "parameters": {
-        "jsCode": "// Fan-Out for Embeddings \u2014 1 item = 1 chunk (liviano, sin duplicar listas grandes)\nconst itemsIn = $input.all().map(it => it.json?.data ?? it.json);\nif (!itemsIn.length) return [];\n\nlet meta = {};\nlet chunks = [];\n\n// Caso: un solo item trae .chunks[]\nif (Array.isArray(itemsIn[0]?.chunks) && itemsIn[0].chunks.length) {\n  const f = itemsIn[0];\n  meta = {\n    source_id:   f.source_id   ?? f.sourceId   ?? null,\n    source_name: f.source_name ?? f.sourceName ?? null,\n    file_name:   f.file_name   ?? f.fileName   ?? null,\n    file_path:   f.file_path   ?? f.filePath   ?? null,\n    source_path: f.source_path ?? f.sourcePath ?? (f.file_path ?? null),\n    dest_path:   f.dest_path   ?? f.destPath   ?? null,\n    page_count:  f.page_count  ?? f.pageCount  ?? null,\n  };\n  chunks = f.chunks.map((c, i) => ({\n    chunk_index: c.chunk_index ?? c.chunkIndex ?? (i + 1),\n    page_number: c.page_number ?? c.pageNumber ?? 1,\n    content:     c.content ?? '',\n  }));\n} else {\n  // Caso: ya viene 1 item por chunk desde Extract\n  const f = itemsIn[0] ?? {};\n  meta = {\n    source_id:   f.source_id   ?? f.sourceId   ?? null,\n    source_name: f.source_name ?? f.sourceName ?? null,\n    file_name:   f.file_name   ?? f.fileName   ?? null,\n    file_path:   f.file_path   ?? f.filePath   ?? null,\n    source_path: f.source_path ?? f.sourcePath ?? (f.file_path ?? null),\n    dest_path:   f.dest_path   ?? f.destPath   ?? null,\n    page_count:  f.page_count  ?? f.pageCount  ?? null,\n  };\n  chunks = itemsIn.map((j, i) => ({\n    chunk_index: j.chunk_index ?? j.chunkIndex ?? (i + 1),\n    page_number: j.page_number ?? j.pageNumber ?? 1,\n    content:     j.content ?? '',\n  }));\n}\n\nreturn chunks.map(c => ({\n  json: { ...meta, ...c, text_length: (c.content?.length ?? 0) }\n}));\n"
+        "jsCode": "// Fan-Out for Embeddings — 1 item = 1 chunk (liviano, sin duplicar listas grandes)\nconst itemsIn = $input.all().map(it => it.json?.data ?? it.json);\nif (!itemsIn.length) return [];\n\nlet meta = {};\nlet chunks = [];\n\n// Caso: un solo item trae .chunks[]\nif (Array.isArray(itemsIn[0]?.chunks) && itemsIn[0].chunks.length) {\n  const f = itemsIn[0];\n  meta = {\n    source_id:   f.source_id   ?? f.sourceId   ?? null,\n    source_name: f.source_name ?? f.sourceName ?? null,\n    file_name:   f.file_name   ?? f.fileName   ?? null,\n    file_path:   f.file_path   ?? f.filePath   ?? null,\n    source_path: f.source_path ?? f.sourcePath ?? (f.file_path ?? null),\n    dest_path:   f.dest_path   ?? f.destPath   ?? null,\n    page_count:  f.page_count  ?? f.pageCount  ?? null,\n  };\n  chunks = f.chunks.map((c, i) => ({\n    chunk_index: c.chunk_index ?? c.chunkIndex ?? (i + 1),\n    page_number: c.page_number ?? c.pageNumber ?? 1,\n    content:     c.content ?? '',\n  }));\n} else {\n  // Caso: ya viene 1 item por chunk desde Extract\n  const f = itemsIn[0] ?? {};\n  meta = {\n    source_id:   f.source_id   ?? f.sourceId   ?? null,\n    source_name: f.source_name ?? f.sourceName ?? null,\n    file_name:   f.file_name   ?? f.fileName   ?? null,\n    file_path:   f.file_path   ?? f.filePath   ?? null,\n    source_path: f.source_path ?? f.sourcePath ?? (f.file_path ?? null),\n    dest_path:   f.dest_path   ?? f.destPath   ?? null,\n    page_count:  f.page_count  ?? f.pageCount  ?? null,\n  };\n  chunks = itemsIn.map((j, i) => ({\n    chunk_index: j.chunk_index ?? j.chunkIndex ?? (i + 1),\n    page_number: j.page_number ?? j.pageNumber ?? 1,\n    content:     j.content ?? '',\n  }));\n}\n\nreturn chunks.map(c => ({\n  json: { ...meta, ...c, text_length: (c.content?.length ?? 0) }\n}));\n",
+        "options": {}
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -280,7 +289,8 @@
     },
     {
       "parameters": {
-        "jsCode": "const refItems = $items('Fan-Out for Embeddings', 0, 0) || [];\nif (Array.isArray(refItems) && refItems.length && refItems[0]?.json) {\n  return [{ json: refItems[0].json }];\n}\nreturn [{ json: $json }];\n"
+        "jsCode": "const refItems = $items('Fan-Out for Embeddings', 0, 0) || [];\nif (Array.isArray(refItems) && refItems.length && refItems[0]?.json) {\n  return [{ json: refItems[0].json }];\n}\nreturn [{ json: $json }];\n",
+        "options": {}
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -293,7 +303,8 @@
     },
     {
       "parameters": {
-        "jsCode": "// Clone Meta: deja pasar tal cual el item con chunk_index/page_number/content y metadatos\nreturn [{ json: $json }];\n"
+        "jsCode": "// Clone Meta: deja pasar tal cual el item con chunk_index/page_number/content y metadatos\nreturn [{ json: $json }];\n",
+        "options": {}
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -311,7 +322,7 @@
         "options": {}
       },
       "type": "n8n-nodes-base.merge",
-      "typeVersion": 3.2,
+      "typeVersion": 3,
       "position": [
         1136,
         560
@@ -321,10 +332,11 @@
     },
     {
       "parameters": {
-        "amount": 0.2
+        "amount": 0.2,
+        "options": {}
       },
       "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
+      "typeVersion": 1,
       "position": [
         928,
         560
@@ -335,7 +347,8 @@
     },
     {
       "parameters": {
-        "jsCode": "const metaItem = $items('Clone Meta', 0, $itemIndex)?.[0]?.json ?? {};\nconst merged = $json ?? {};\nconst embItem = $items('Embedding Response Handler', 0, $itemIndex)?.[0]?.json ?? {};\nconst embeddingHttp = Array.isArray(embItem.embedding) ? embItem.embedding : null;\nconst embeddingMeta = Array.isArray(metaItem.embedding) ? metaItem.embedding : null;\nconst embedding = Array.isArray(embeddingHttp) ? embeddingHttp : (Array.isArray(embeddingMeta) ? embeddingMeta : null);\nconst status = embItem.status ?? (Array.isArray(embedding) ? 'ok' : 'failed');\nconst content = metaItem.content ?? merged.content ?? merged.chunk_text ?? metaItem.chunk_text ?? '';\nreturn [{\n  json: {\n    ...metaItem,\n    content,\n    embedding,\n    embedding_status: status,\n    chunk_text: merged.chunk_text ?? content,\n    meta: metaItem\n  }\n}];\n"
+        "jsCode": "const metaItem = $items('Clone Meta', 0, $itemIndex)?.[0]?.json ?? {};\nconst merged = $json ?? {};\nconst embItem = $items('Embedding Response Handler', 0, $itemIndex)?.[0]?.json ?? {};\nconst embeddingHttp = Array.isArray(embItem.embedding) ? embItem.embedding : null;\nconst embeddingMeta = Array.isArray(metaItem.embedding) ? metaItem.embedding : null;\nconst embedding = Array.isArray(embeddingHttp) ? embeddingHttp : (Array.isArray(embeddingMeta) ? embeddingMeta : null);\nconst status = embItem.status ?? (Array.isArray(embedding) ? 'ok' : 'failed');\nconst content = metaItem.content ?? merged.content ?? merged.chunk_text ?? metaItem.chunk_text ?? '';\nreturn [{\n  json: {\n    ...metaItem,\n    content,\n    embedding,\n    embedding_status: status,\n    chunk_text: merged.chunk_text ?? content,\n    meta: metaItem\n  }\n}];\n",
+        "options": {}
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -348,7 +361,8 @@
     },
     {
       "parameters": {
-        "jsCode": "const src = $json || {};\nlet embedding = null;\nlet status = 'failed';\nconst pick = obj => Array.isArray(obj?.data) && Array.isArray(obj.data[0]?.embedding) ? obj.data[0].embedding : null;\nconst sources = [src, src.body, src.openai_response];\nfor (const candidate of sources) {\n  const emb = pick(candidate);\n  if (Array.isArray(emb)) {\n    embedding = emb;\n    status = 'ok';\n    break;\n  }\n}\nif (!Array.isArray(embedding) && Array.isArray(src?.embedding)) {\n  embedding = src.embedding;\n  status = 'ok';\n}\nreturn [{ json: { embedding: Array.isArray(embedding) ? embedding : null, status: Array.isArray(embedding) ? 'ok' : status } }];\n"
+        "jsCode": "const src = $json || {};\nlet embedding = null;\nlet status = 'failed';\nconst pick = obj => Array.isArray(obj?.data) && Array.isArray(obj.data[0]?.embedding) ? obj.data[0].embedding : null;\nconst sources = [src, src.body, src.openai_response];\nfor (const candidate of sources) {\n  const emb = pick(candidate);\n  if (Array.isArray(emb)) {\n    embedding = emb;\n    status = 'ok';\n    break;\n  }\n}\nif (!Array.isArray(embedding) && Array.isArray(src?.embedding)) {\n  embedding = src.embedding;\n  status = 'ok';\n}\nreturn [{ json: { embedding: Array.isArray(embedding) ? embedding : null, status: Array.isArray(embedding) ? 'ok' : status } }];\n",
+        "options": {}
       },
       "id": "d82a9f47-53ad-4c6a-adac-e67d345fb7c1",
       "name": "Embedding Response Handler",
@@ -393,7 +407,8 @@
           "collection": [],
           "fixedCollection": [],
           "dateTime": []
-        }
+        },
+        "options": {}
       },
       "id": "edcd242f-dffd-4b80-9bcb-7078e7432090",
       "name": "Rearmar Payload",
@@ -406,7 +421,8 @@
     },
     {
       "parameters": {
-        "functionCode": "if ($json.chunk_index == null || $json.chunk_index <= 0) {\n  throw new Error('chunk_index inv\u00e1lido antes del INSERT');\n}\nreturn $json;\n"
+        "functionCode": "if ($json.chunk_index == null || $json.chunk_index <= 0) {\n  throw new Error('chunk_index inválido antes del INSERT');\n}\nreturn $json;\n",
+        "options": {}
       },
       "id": "a9011556-ed49-4da7-9c85-4f43d5e8709e",
       "name": "Function Guard",
@@ -426,7 +442,7 @@
       "id": "e0305182-2027-4ae7-829c-d7c64c6b42b7",
       "name": "Ensure KB PK",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "typeVersion": 2,
       "position": [
         -1568,
         96
@@ -439,7 +455,9 @@
       }
     },
     {
-      "parameters": {},
+      "parameters": {
+        "options": {}
+      },
       "id": "3aa3603d-0272-4583-9207-eb17089ddf90",
       "name": "Manual Trigger (Tests)",
       "type": "n8n-nodes-base.manualTrigger",
@@ -458,7 +476,7 @@
       "id": "6e53d942-3e71-404f-8db3-8e141aa93043",
       "name": "Fetch Test Source",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "typeVersion": 2,
       "position": [
         -1376,
         96
@@ -472,7 +490,8 @@
     },
     {
       "parameters": {
-        "functionCode": "const sourceId = $json.source_id ?? 1;\nconst baseChunk = 10;\nconst items = [];\nfor (let i = 0; i < 3; i++) {\n  const idx = baseChunk + i;\n  const page = i + 1;\n  items.push({\n    json: {\n      source_id: sourceId,\n      chunk_index: idx,\n      page_number: page,\n      content: `Test chunk ${idx}`,\n      chunk_text: `Test chunk ${idx}`,\n      dest_path: null,\n      embedding: [0.01 * (i + 1), 0.02 * (i + 1), 0.03 * (i + 1)]\n    }\n  });\n}\nreturn items;\n"
+        "functionCode": "const sourceId = $json.source_id ?? 1;\nconst baseChunk = 10;\nconst items = [];\nfor (let i = 0; i < 3; i++) {\n  const idx = baseChunk + i;\n  const page = i + 1;\n  items.push({\n    json: {\n      source_id: sourceId,\n      chunk_index: idx,\n      page_number: page,\n      content: `Test chunk ${idx}`,\n      chunk_text: `Test chunk ${idx}`,\n      dest_path: null,\n      embedding: [0.01 * (i + 1), 0.02 * (i + 1), 0.03 * (i + 1)]\n    }\n  });\n}\nreturn items;\n",
+        "options": {}
       },
       "id": "f589ce37-b2c0-4f68-b4f3-489b2410737b",
       "name": "Test Runner",
@@ -485,7 +504,8 @@
     },
     {
       "parameters": {
-        "functionCode": "const inputs = $input.all();\nconst result = [];\nfor (const batch of inputs) {\n  for (const item of batch) {\n    result.push(item);\n  }\n}\nreturn result;\n"
+        "functionCode": "const inputs = $input.all();\nconst result = [];\nfor (const batch of inputs) {\n  for (const item of batch) {\n    result.push(item);\n  }\n}\nreturn result;\n",
+        "options": {}
       },
       "id": "f9573d31-a947-4f52-bf19-834e57d08e8f",
       "name": "Collect Items for Loop",
@@ -505,7 +525,7 @@
       "id": "fce5c085-a0a5-4264-ae5b-8295e798fee7",
       "name": "Checks",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "typeVersion": 2,
       "position": [
         1824,
         656
